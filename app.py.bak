@@ -1,0 +1,141 @@
+import streamlit as st
+from scraper import Scraper
+from database import Database
+import pandas as pd
+from config import PRODUCT_CODES, SIZES
+import logging
+import os
+from datetime import datetime
+import time
+
+# ログの設定
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('data/logs/app.log', mode='a', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+
+# Streamlitの設定
+st.set_page_config(
+    page_title="段ボールスクレイピングアプリ",
+    page_icon="📦",
+    layout="wide"
+)
+
+# タイトル
+st.title("段ボールスクレイピングアプリ")
+
+# スクレイパーの初期化
+@st.cache_resource
+def init_scraper():
+    return Scraper()
+
+scraper = init_scraper()
+
+# データベースの初期化
+db = Database()
+    
+# サイズ選択
+st.header("サイズ選択")
+selected_size = st.selectbox(
+    "取得したいサイズを選択してください",
+    SIZES,
+    index=0
+)
+
+if not selected_size:
+    st.warning("サイズを選択してください。")
+else:
+    if st.button("選択したサイズの商品IDを取得"):
+        with st.spinner("商品IDを取得中..."):
+            try:
+                product_ids = scraper.get_product_ids([selected_size])
+                if product_ids:
+                    st.success(f"{len(product_ids)}件の商品IDを取得しました。")
+                    
+                    # 商品IDの表示
+                    st.subheader("取得した商品ID")
+                    df = pd.DataFrame([
+                        {"商品ID": p['id'], "商品名": p['name'], "サイズ": selected_size}
+                        for p in product_ids
+                    ])
+                    st.dataframe(df)
+                    
+                    # サイズごとの絞り込みボタン
+                    if st.button(f"{selected_size}の商品を絞り込む"):
+                        filtered_df = df[df['サイズ'] == selected_size]
+                        st.subheader(f"{selected_size}の商品")
+                        st.dataframe(filtered_df)
+                    
+                    # CSVダウンロード
+                    csv = df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="CSVダウンロード",
+                        data=csv,
+                        file_name=f"product_ids_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.error("商品IDの取得に失敗しました。")
+            except Exception as e:
+                st.error(f"エラーが発生しました: {str(e)}")
+                logging.error(f"商品ID取得中にエラーが発生: {str(e)}", exc_info=True)
+
+    # 商品詳細取得
+    st.header("商品詳細取得")
+    if st.button("選択したサイズの商品詳細を一括取得"):
+        with st.spinner("商品詳細を取得中..."):
+            try:
+                # 選択したサイズの商品IDを取得
+                product_ids = scraper.get_product_ids([selected_size])
+                if not product_ids:
+                    st.warning("商品IDが見つかりません。")
+                    st.stop()
+                
+                # 進捗バーの設定
+                progress_bar = st.progress(0)
+                total_products = len(product_ids)
+                
+                # 商品詳細の取得
+                all_data = []
+                for i, product in enumerate(product_ids, 1):
+                    try:
+                        product_id = product['id']
+                        data = scraper.get_product_data(product_id)
+                        if data:
+                            # 商品名が取得できなかった場合はデータベースの名前を使用
+                            if '商品名' not in data or not data['商品名']:
+                                data['商品名'] = product.get('name', '')
+                            all_data.append(data)
+                        progress_bar.progress(i / total_products)
+                    except Exception as e:
+                        logging.error(f"商品 {product.get('id', 'unknown')} の詳細取得中にエラーが発生: {str(e)}", exc_info=True)
+                        continue
+                
+                if all_data:
+                    st.success(f"{len(all_data)}件の商品詳細を取得しました。")
+                    
+                    # 商品詳細の表示
+                    st.subheader("取得した商品詳細")
+                    df = pd.DataFrame(all_data)
+                    st.dataframe(df)
+            
+                    # CSVダウンロード
+                    csv = df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="CSVダウンロード",
+                        data=csv,
+                        file_name=f"product_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.error("商品詳細の取得に失敗しました。")
+            except Exception as e:
+                st.error(f"エラーが発生しました: {str(e)}")
+                logging.error(f"商品詳細取得中にエラーが発生: {str(e)}", exc_info=True)
+
+if __name__ == "__main__":
+    pass

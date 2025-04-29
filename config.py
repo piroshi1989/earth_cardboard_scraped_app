@@ -1,14 +1,87 @@
-# 商品コードのリスト
-PRODUCT_CODES = [
-    'A4-60',
+# サイズのリスト
+SIZES = [
+    'size-60',
+    'size-80',
+    'size-100',
+    'size-120',
+    'size-140',
+    'size-160',
+    'size-mail-A4-25',
+    'size-mail-A4-30'
 ]
 
 # 枚数のリスト
 QUANTITIES = [
-    1, 10, 20, 30, 40, 50, 60, 70, 80, 100, 110, 120, 130, 140, 150, 
-    160, 170, 180, 190, 195, 200, 210, 220, 240, 250, 260, 270, 280, 285, 300,
-    320, 330, 340, 350, 360, 380, 390, 400, 420, 440, 450, 480, 500, 540, 550, 560,
-    600, 640, 650, 700, 720, 750, 780, 800, 840, 900, 960, 1000, 1050, 1080, 1120,
-    1200, 1250, 1300, 1400, 1500, 1600, 1750, 1960, 2000, 2030, 2040, 2080, 2100,
-    2500, 3000, 3010, 3040, 3080
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    20,
+    30,
+    40,
+    50,
+    60,
+    70,
+    80,
+    100,
+    110,
+    120,
+    130,
+    140,
+    150,
+    160,
+    170,
+    180,
+    190,
+    200,
+    300,
+    400,
+    500,
+    600,
+    700,
+    800,
+    900,
+    1000,
+    1400,
+    1600,
+    1800,
+    2000,
+    2200,
+    2400,
+    2600,
+    2800,
+    3000,
+    3200,
+    3400,
+    3600,
+    3800,
+    4000,
+    4200,
 ] 
+
+# リクエストヘッダーの設定
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0'
+}
+
+# 商品詳細ページのURL
+BASE_URL = 'https://www.bestcarton.com/cardboard/box/'
+
+# カテゴリページのURL
+CATEGORY_BASE_URL = 'https://www.bestcarton.com/category/size/'
