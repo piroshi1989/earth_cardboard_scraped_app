@@ -39,13 +39,13 @@ class Scraper:
             logging.error(f"セッションの初期化に失敗: {str(e)}")
             raise
 
-    def make_request(self, url, max_retries=3, unit=None):
+    def make_request(self, url, max_retries=5, unit=None):
         """Splashを使用してリクエストを送信"""
-        splash_url = "http://localhost:8050/render.html"
+        splash_url = "http://splash:8050/render.html"  # Docker環境ではサービス名を使用
         params = {
             "url": url,
-            "wait": 2,  # ページの読み込み待機時間（秒）
-            "timeout": 30,
+            "wait": 5,  # ページの読み込み待機時間（秒）を延長
+            "timeout": 60,  # タイムアウト時間を延長
             "proxy": self.proxy_manager.get_best_proxy() if self.proxy_manager.get_best_proxy() else None
         }
         
@@ -54,23 +54,42 @@ class Scraper:
             params["lua_source"] = f"""
             function main(splash)
                 splash:go(splash.args.url)
-                splash:wait(2)
+                splash:wait(5)  # 待機時間を延長
                 -- タブをクリック
                 splash:runjs("document.getElementById('unit_{unit}').click()")
-                splash:wait(2)
+                splash:wait(10)  # 待機時間を延長
+                -- 価格リストが表示されるまで待機
+                splash:runjs([[
+                    function waitForElement() {{
+                        return new Promise((resolve) => {{
+                            const checkElement = () => {{
+                                const element = document.getElementById('small_price_list');
+                                if (element) {{
+                                    resolve();
+                                }} else {{
+                                    setTimeout(checkElement, 1000);
+                                }}
+                            }};
+                            checkElement();
+                        }});
+                    }}
+                    waitForElement();
+                ]])
+                splash:wait(5)  # 追加の待機時間
                 return splash:html()
             end
             """
         
         for attempt in range(max_retries):
             try:
-                response = requests.get(splash_url, params=params, headers=HEADERS)
+                response = requests.get(splash_url, params=params, headers=HEADERS, timeout=60)  # リクエストのタイムアウトも延長
                 response.raise_for_status()
                 return response
             except Exception as e:
-                logging.warning(f"リクエスト失敗 (試行 {attempt + 1}/{max_retries}): {str(e)}")
+                if attempt == 0:  # 最初の試行でのみログを出力
+                    logging.warning(f"リクエスト失敗 (試行 {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt < max_retries - 1:
-                    time.sleep(random.uniform(2, 5))
+                    time.sleep(random.uniform(5, 10))  # リトライ間隔を延長
                 else:
                     raise
 
@@ -329,6 +348,9 @@ class Scraper:
                     '材質': self._get_text(soup, '紙質（強度）'),
                 }
                 
+                # 価格情報の取得
+                price_data = {}
+                
                 # 1枚単位の価格情報を取得
                 price_list = soup.find('ul', id='small_price_list')
                 if price_list:
@@ -340,9 +362,14 @@ class Scraper:
                             if match:
                                 quantity = int(match.group(1))
                                 price = int(match.group(2))
-                                data[f'{quantity}枚の価格'] = price
-                                logging.info(f"{quantity}枚の価格: {price}円")
-                
+                                price_data[quantity] = price
+                                logging.info(f"{quantity}枚の価格を取得: {price}円")
+                            else:
+                                logging.warning(f"small_price{i} の要素が見つかりませんでした")
+                                continue
+                        else:
+                            logging.warning(f"small_price{i} の要素が見つかりませんでした")
+                            continue
                 # 10枚単位の価格を取得
                 response = self.make_request(url, unit=10)
                 soup = BeautifulSoup(response.text, 'html.parser')
@@ -357,8 +384,14 @@ class Scraper:
                             if match:
                                 quantity = int(match.group(1))
                                 price = int(match.group(2))
-                                data[f'{quantity}枚の価格'] = price
-                                logging.info(f"{quantity}枚の価格: {price}円")
+                                price_data[quantity] = price
+                                logging.info(f"{quantity}枚の価格を取得: {price}円")
+                        else:
+                            logging.warning(f"small_price{i} の要素が見つかりませんでした")
+                            continue
+                    else:
+                        logging.warning(f"small_price{i} の要素が見つかりませんでした")
+                        continue
                 
                 # big_priceの価格を取得（タブ切り替えなし）
                 response = self.make_request(url)
@@ -372,12 +405,22 @@ class Scraper:
                         if match:
                             quantity = int(match.group(1))
                             price = int(match.group(2))
-                            data[f'{quantity}枚の価格'] = price
-                            logging.info(f"{quantity}枚の価格: {price}円")
+                            price_data[quantity] = price
+                            logging.info(f"{quantity}枚の価格を取得: {price}円")
+                        else:
+                            logging.warning(f"big_price{i} の要素が見つかりませんでした")
+                            continue
+                    else:
+                        logging.warning(f"big_price{i} の要素が見つかりませんでした")
+                        continue
+                
+                # 価格データを統合
+                for quantity, price in price_data.items():
+                    data[f'{quantity}枚の価格'] = price
                 
                 # データベースに保存
                 self.db.save_product(data)
-                logging.info(f"商品データの取得完了: {data}")
+                logging.info(f"商品データの取得完了: {product_id}")
                 
             except Exception as e:
                 logging.error(f"商品 {product_id} の詳細取得中にエラー: {str(e)}")

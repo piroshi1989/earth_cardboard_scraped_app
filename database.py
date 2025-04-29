@@ -90,9 +90,9 @@ class Database:
                 CREATE TABLE IF NOT EXISTS products (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     product_id TEXT UNIQUE,
-            name TEXT,
-            size TEXT,
-            url TEXT,
+                    name TEXT,
+                    size TEXT,
+                    url TEXT,
                     outer_dimension_sum REAL,
                     inner_length REAL,
                     inner_width REAL,
@@ -154,9 +154,12 @@ class Database:
                 'standard_width': '規格幅'
             }
             
-            # 価格カラムのマッピングを追加
-            for q in QUANTITIES:
-                column_mapping[f'price_{q}'] = f'枚数_{q}'
+            # 価格データの処理
+            price_data = {}
+            for key, value in product_data.items():
+                if '枚の価格' in key:
+                    quantity = int(key.replace('枚の価格', ''))
+                    price_data[f'price_{quantity}'] = value
             
             if existing:
                 # 空でない値だけを更新対象にする
@@ -167,6 +170,12 @@ class Database:
                     if val is not None and str(val).strip() != "":
                         columns.append(f"{col} = ?")
                         values.append(val)
+                
+                # 価格データの更新
+                for col, val in price_data.items():
+                    columns.append(f"{col} = ?")
+                    values.append(val)
+                
                 # updated_atは必ず更新
                 columns.append("updated_at = datetime('now')")
                 sql = f'''
@@ -178,8 +187,8 @@ class Database:
                 cursor.execute(sql, values)
             else:
                 # 挿入時は従来通り
-                columns = list(column_mapping.keys()) + ['created_at', 'updated_at']
-                placeholders = ['?'] * len(column_mapping) + ["datetime('now')", "datetime('now')"]
+                columns = list(column_mapping.keys()) + list(price_data.keys()) + ['created_at', 'updated_at']
+                placeholders = ['?'] * (len(column_mapping) + len(price_data)) + ["datetime('now')", "datetime('now')"]
                 sql = f'''
                     INSERT INTO products (
                     {", ".join(columns)}
@@ -188,6 +197,7 @@ class Database:
                     )
                 '''
                 values = [product_data.get(column_mapping[col]) for col in column_mapping.keys()]
+                values.extend(price_data.values())
                 cursor.execute(sql, values)
             
             conn.commit()
