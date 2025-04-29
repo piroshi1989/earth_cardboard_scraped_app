@@ -26,7 +26,7 @@ class JSTFormatter(logging.Formatter):
 
 # ログの設定
 log_formatter = JSTFormatter('%(asctime)s - %(levelname)s - %(message)s')
-file_handler = logging.FileHandler('data/logs/app.log', mode='a', encoding='utf-8')
+file_handler = logging.FileHandler(f'data/logs/{datetime.now().strftime("%Y%m%d")}.log', mode='a', encoding='utf-8')
 file_handler.setFormatter(log_formatter)
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(log_formatter)
@@ -73,6 +73,8 @@ class Database:
 
     def _create_tables(self):
         """必要なテーブルを作成"""
+        conn = None
+        cursor = None
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -84,32 +86,32 @@ class Database:
             price_columns_str = ',\n'.join(price_columns)
             
             # productsテーブルの作成
-            cursor.execute(f'''
+            cursor.execute(f"""
                 CREATE TABLE IF NOT EXISTS products (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     product_id TEXT UNIQUE,
             name TEXT,
             size TEXT,
             url TEXT,
-                    created_at TIMESTAMP,
-                    updated_at TIMESTAMP,
                     outer_dimension_sum REAL,
                     inner_length REAL,
                     inner_width REAL,
                     inner_depth REAL,
+                    manufacturing_method TEXT,
                     outer_length REAL,
                     outer_width REAL,
                     outer_depth REAL,
-                    manufacturing_method TEXT,
                     processing_location TEXT,
                     color TEXT,
                     box_type TEXT,
                     thickness TEXT,
                     material TEXT,
                     standard_width REAL,
-                    {price_columns_str}
+                    {price_columns_str},
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            ''')
+            """)
             
             conn.commit()
             logging.info("テーブルの作成が完了しました")
@@ -157,22 +159,25 @@ class Database:
                 column_mapping[f'price_{q}'] = f'枚数_{q}'
             
             if existing:
-                # 更新用のSQLを生成
-                columns = list(column_mapping.keys())
-                placeholders = [f"{col} = ?" for col in columns]
-                placeholders.append("updated_at = datetime('now')")
+                # 空でない値だけを更新対象にする
+                columns = []
+                values = []
+                for col, key in column_mapping.items():
+                    val = product_data.get(key)
+                    if val is not None and str(val).strip() != "":
+                        columns.append(f"{col} = ?")
+                        values.append(val)
+                # updated_atは必ず更新
+                columns.append("updated_at = datetime('now')")
                 sql = f'''
                     UPDATE products SET
-                    {", ".join(placeholders)}
+                    {", ".join(columns)}
                     WHERE product_id = ?
                 '''
-                
-                # 値のリストを作成
-                values = [product_data.get(column_mapping[col]) for col in columns]
                 values.append(product_data['商品コード'])
-                
+                cursor.execute(sql, values)
             else:
-                # 挿入用のSQLを生成
+                # 挿入時は従来通り
                 columns = list(column_mapping.keys()) + ['created_at', 'updated_at']
                 placeholders = ['?'] * len(column_mapping) + ["datetime('now')", "datetime('now')"]
                 sql = f'''
@@ -182,13 +187,11 @@ class Database:
                     {", ".join(placeholders)}
                     )
                 '''
-                
-                # 値のリストを作成
                 values = [product_data.get(column_mapping[col]) for col in column_mapping.keys()]
+                cursor.execute(sql, values)
             
-            cursor.execute(sql, values)
             conn.commit()
-            logging.info(f"商品情報を保存しました: {product_data['商品コード']}, 商品名: {product_data.get('商品名', 'なし')}")
+            logging.info(f"商品情報を保存しました: {product_data['商品コード']}")
             
         except sqlite3.Error as e:
             logging.error(f"商品情報の保存中にエラーが発生: {str(e)}")
@@ -357,9 +360,6 @@ class Database:
             conn = self._get_connection()
             cursor = conn.cursor()
             if size is not None:
-                # size-mail-プレフィックスを削除
-                if size.startswith('size-mail-'):
-                    size = size.replace('size-mail-', '')
                 cursor.execute(
                     "SELECT product_id, name, size, created_at FROM products WHERE size = ? ORDER BY created_at DESC",
                     (str(size),)
@@ -381,3 +381,65 @@ class Database:
             return []
         finally:
             cursor.close() 
+
+    def recreate_tables(self):
+        """テーブルを再作成"""
+        try:
+            self.drop_tables()
+            self._create_tables()
+            logging.info("テーブルの再作成が完了しました")
+        except Exception as e:
+            logging.error(f"テーブルの再作成中にエラーが発生: {str(e)}")
+            raise
+
+    def drop_tables(self):
+        """既存のテーブルを削除"""
+        conn = None
+        cursor = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # テーブルの存在確認と削除
+            cursor.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='products'
+            """)
+            
+            tables = cursor.fetchall()
+            for table in tables:
+                table_name = table[0]
+                cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
+                logging.info(f"テーブル {table_name} を削除しました")
+            
+            conn.commit()
+            logging.info("全てのテーブルを削除しました")
+            
+        except sqlite3.Error as e:
+            logging.error(f"テーブル削除中にSQLiteエラー: {str(e)}")
+            raise
+        except Exception as e:
+            logging.error(f"テーブル削除中に予期せぬエラー: {str(e)}")
+            raise
+        finally:
+            try:
+                if cursor:
+                    cursor.close()
+                if conn:
+                    conn.close()
+            except Exception as e:
+                logging.error(f"接続のクローズ中にエラー: {str(e)}")
+
+
+    def get_size_type(self, product_id):
+        """商品IDからサイズタイプを取得"""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT size FROM products WHERE product_id = ?", (product_id,))
+            return cursor.fetchone()[0]
+        except Exception as e:
+            logging.error(f"サイズタイプの取得中にエラーが発生: {str(e)}")
+            return None
+        finally:
+            cursor.close()

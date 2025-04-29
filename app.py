@@ -2,7 +2,7 @@ import streamlit as st
 
 # Streamlitの設定
 st.set_page_config(
-    page_title="段ボールスクレイピングアプリ",
+    page_title="アースワンスクレイピングアプリ",
     page_icon="📦",
     layout="wide"
 )
@@ -13,12 +13,16 @@ import pandas as pd
 from config import SIZES, QUANTITIES
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 import time
 import pytz
+from io import StringIO
 
 # JSTタイムゾーンの設定
 jst = pytz.timezone('Asia/Tokyo')
+
+# ログをキャプチャするためのストリーム
+log_stream = StringIO()
 
 # ログのフォーマッターをカスタマイズ
 class JSTFormatter(logging.Formatter):
@@ -34,17 +38,31 @@ class JSTFormatter(logging.Formatter):
 
 # ログの設定
 log_formatter = JSTFormatter('%(asctime)s - %(levelname)s - %(message)s')
-file_handler = logging.FileHandler('data/logs/app.log', mode='a', encoding='utf-8')
+
+# ファイルハンドラ
+file_handler = logging.FileHandler(f'data/logs/{datetime.now().strftime("%Y%m%d")}.log', mode='a', encoding='utf-8')
 file_handler.setFormatter(log_formatter)
-stream_handler = logging.StreamHandler()
+
+# ストリームハンドラ（Streamlit用）
+stream_handler = logging.StreamHandler(log_stream)
 stream_handler.setFormatter(log_formatter)
 
-logging.basicConfig(
-    level=logging.INFO,
-    handlers=[file_handler, stream_handler]
-)
+# ロガーの設定
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.addHandler(file_handler)
+logger.addHandler(stream_handler)
+
 # タイトル
 st.title("アースワンスクレイピングアプリ")
+
+# ログ表示用のコンポーネント
+st.sidebar.header("ログ")
+log_container = st.sidebar.empty()
+
+# ログを更新する関数
+def update_log_display():
+    log_container.text_area("ログ", value=log_stream.getvalue(), height=300, key="log_display")
 
 # スクレイパーの初期化
 @st.cache_resource
@@ -134,18 +152,11 @@ if products:
 else:
     st.info("商品テーブルは空です")
 
-# ログの設定
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(f'data/logs/{datetime.now().strftime("%Y%m%d")}.log', mode='a', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
-    
+# ログを更新
+update_log_display()
+
 # サイズ選択
-st.header("サイズ選択")
+st.header("①サイズ選択")
 selected_size = st.selectbox(
     "取得したいサイズを選択してください",
     SIZES,
@@ -155,7 +166,7 @@ selected_size = st.selectbox(
 if not selected_size:
     st.warning("サイズを選択してください。")
 else:
-    if st.button("選択したサイズの商品IDを取得"):
+    if st.button("①選択したサイズの商品ID、商品名、URLを取得"):
         with st.spinner("商品IDを取得中..."):
             try:
                 product_ids = scraper.get_product_ids([selected_size])
@@ -170,40 +181,8 @@ else:
                     ])
                     st.dataframe(df)
                     
-                    # 商品IDを選択して詳細を取得する機能
-                    st.subheader("特定の商品IDの詳細を取得")
-                    selected_product_id = st.selectbox(
-                        "詳細を取得したい商品IDを選択してください",
-                        options=df['商品ID'].tolist(),
-                        index=0
-                    )
-                    
-                    if st.button("選択した商品の詳細を取得"):
-                        with st.spinner("商品詳細を取得中..."):
-                            try:
-                                data = scraper.get_product_details([selected_product_id])
-                                if data:
-                                    st.success("商品詳細を取得しました。")
-                                    st.subheader("商品詳細")
-                                    detail_df = pd.DataFrame([data])
-                                    st.dataframe(detail_df)
-                                    
-                                    # CSVダウンロード
-                                    csv = detail_df.to_csv(index=False).encode('utf-8')
-                                    st.download_button(
-                                        label="CSVダウンロード",
-                                        data=csv,
-                                        file_name=f"product_detail_{selected_product_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                        mime="text/csv"
-                                    )
-                                else:
-                                    st.error("商品詳細の取得に失敗しました。")
-                            except Exception as e:
-                                st.error(f"エラーが発生しました: {str(e)}")
-                                logging.error(f"商品詳細取得中にエラーが発生: {str(e)}", exc_info=True)
-                    
                     # サイズごとの絞り込みボタン
-                    if st.button(f"{selected_size}の商品を絞り込む"):
+                    if st.button(f"{selected_size}の商品を絞り込む", key="filter_by_size"):
                         filtered_df = df[df['サイズ'] == selected_size]
                         st.subheader(f"{selected_size}の商品")
                         st.dataframe(filtered_df)
@@ -214,7 +193,8 @@ else:
                         label="CSVダウンロード",
                         data=csv,
                         file_name=f"product_ids_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
+                        mime="text/csv",
+                        key="download_product_ids"
                     )
                 else:
                     st.error("商品IDの取得に失敗しました。")
@@ -223,54 +203,151 @@ else:
                 logging.error(f"商品ID取得中にエラーが発生: {str(e)}", exc_info=True)
 
     # 商品詳細取得
-    st.header("商品詳細取得")
-    if st.button("選択したサイズの商品詳細を一括取得"):
-        with st.spinner("商品詳細を取得中..."):
-            try:
-                # 選択したサイズの商品IDを取得
-                product_ids = scraper.get_product_ids([selected_size])
-                if not product_ids:
-                    st.warning("商品IDが見つかりません。")
-                    st.stop()
-                
-                # 進捗バーの設定
-                progress_bar = st.progress(0)
-                total_products = len(product_ids)
-                
-                # 商品詳細の取得
-                all_data = []
-                for i, product in enumerate(product_ids, 1):
-                    try:
-                        product_id = product['id']
-                        data = scraper.get_product_details([product_id])
-                        if data:
-                            all_data.append(data)
-                        progress_bar.progress(i / total_products)
-                    except Exception as e:
-                        logging.error(f"商品 {product.get('id', 'unknown')} の詳細取得中にエラーが発生: {str(e)}", exc_info=True)
-                        continue
-                
-                if all_data:
-                    st.success(f"{len(all_data)}件の商品詳細を取得しました。")
+    st.header("②-1 商品詳細取得(複数商品)")
+    # データベースから選択したサイズの商品IDを取得
+    stored_products = db.get_product_ids(selected_size)
+    if stored_products:
+        if st.button("②選択したサイズの商品詳細を一括取得"):
+            with st.spinner("商品詳細を取得中..."):
+                try:
+                    # 進捗バーの設定
+                    progress_bar = st.progress(0)
+                    total_products = len(stored_products)
                     
-                    # 商品詳細の表示
-                    st.subheader("取得した商品詳細")
-                    df = pd.DataFrame(all_data)
-                    st.dataframe(df)
-            
-                    # CSVダウンロード
-                    csv = df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="CSVダウンロード",
-                        data=csv,
-                        file_name=f"product_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
-                    )
-                else:
-                    st.error("商品詳細の取得に失敗しました。")
-            except Exception as e:
-                st.error(f"エラーが発生しました: {str(e)}")
-                logging.error(f"商品詳細取得中にエラーが発生: {str(e)}", exc_info=True)
+                    # 商品詳細の取得
+                    all_data = []
+                    for i, product in enumerate(stored_products, 1):
+                        try:
+                            # 商品IDの存在確認
+                            if not isinstance(product, dict):
+                                logging.error(f"不正な商品データ形式: {product}")
+                                continue
+                                
+                            product_id = product.get('product_id')
+                            if not product_id:
+                                logging.error(f"商品IDが存在しません: {product}")
+                                continue
+                                
+                            # 商品IDの形式確認
+                            if not isinstance(product_id, (str, int)):
+                                logging.error(f"不正な商品ID形式: {product_id}")
+                                continue
+                                
+                            # 商品IDを文字列に変換
+                            product_id = str(product_id)
+                            
+                            # 商品詳細の取得
+                            data = scraper.get_product_details([product_id])
+                            if data:
+                                all_data.append(data)
+                                logging.info(f"商品 {i}/{len(stored_products)} の詳細を取得しました: {product_id}")
+                            else:
+                                logging.warning(f"商品 {i}/{len(stored_products)} の詳細を取得できませんでした: {product_id}")
+                                
+                        except Exception as e:
+                            logging.error(f"商品 {i}/{len(stored_products)} の処理中にエラー: {str(e)}")
+                            continue
+                    
+                    if all_data:
+                        st.success(f"{len(all_data)}件の商品詳細を取得しました。")
+                        
+                        # 商品詳細の表示
+                        st.subheader("取得した商品詳細")
+                        df = pd.DataFrame(all_data)
+                        st.dataframe(df)
+                
+                        # CSVダウンロード
+                        csv = df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="CSVダウンロード",
+                            data=csv,
+                            file_name=f"product_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
+                    else:
+                        st.error("商品詳細の取得に失敗しました。")
+                except Exception as e:
+                    st.error(f"エラーが発生しました: {str(e)}")
+                    logging.error(f"商品詳細取得中にエラーが発生: {str(e)}", exc_info=True)
+    else:
+        st.warning(f"{selected_size}のサイズの商品IDがデータベースに存在しません。")
+
+    # 商品詳細取得（単一商品）
+    st.header("②-2 商品詳細取得（単一商品）")
+
+    # データベースから選択したサイズの商品IDを取得
+    stored_products = db.get_product_ids(selected_size)
+    if stored_products:
+        # 商品IDと商品名のリストを作成
+        product_options = [f"{p['product_id']} - {p['name']}" for p in stored_products]
+        
+        # 商品IDの選択
+        selected_product = st.selectbox(
+            "詳細を取得したい商品を選択してください",
+            options=product_options,
+            index=0
+        )
+        
+        # 選択された商品IDを抽出
+        selected_product_id = selected_product.split(" - ")[0]
+        
+        if st.button("選択した商品の詳細を取得"):
+            with st.spinner("商品詳細を取得中..."):
+                try:
+                    # 選択した商品IDの詳細を取得
+                    data = scraper.get_product_details([selected_product_id])
+                    if data:
+                        st.success("商品詳細を取得しました。")
+                        
+                        # 商品詳細の表示
+                        st.subheader("商品詳細")
+                        detail_df = pd.DataFrame([data])
+                        
+                        # 日本語のカラム名マッピング
+                        column_names = {
+                            'product_id': '商品ID',
+                            'name': '商品名',
+                            'size': 'サイズ',
+                            'url': 'URL',
+                            'outer_dimension_sum': '外形三辺合計',
+                            'inner_length': '内寸_長さ',
+                            'inner_width': '内寸_幅',
+                            'inner_depth': '内寸_深さ',
+                            'outer_length': '外寸_長さ',
+                            'outer_width': '外寸_幅',
+                            'outer_depth': '外寸_深さ',
+                            'manufacturing_method': '製法',
+                            'processing_location': '加工先',
+                            'color': '色',
+                            'box_type': '形式',
+                            'thickness': '厚み',
+                            'material': '材質',
+                            'standard_width': '規格幅'
+                        }
+                        # 価格カラムの日本語名を追加
+                        for q in QUANTITIES:
+                            column_names[f'price_{q}'] = f'{q}枚の価格'
+                        
+                        # カラム名を日本語に変更
+                        detail_df = detail_df.rename(columns=column_names)
+                        
+                        st.dataframe(detail_df)
+                        
+                        # CSVダウンロード
+                        csv = detail_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="CSVダウンロード",
+                            data=csv,
+                            file_name=f"product_detail_{selected_product_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
+                    else:
+                        st.error("商品詳細の取得に失敗しました。")
+                except Exception as e:
+                    st.error(f"エラーが発生しました: {str(e)}")
+                    logging.error(f"商品詳細取得中にエラーが発生: {str(e)}", exc_info=True)
+    else:
+        st.warning(f"{selected_size}のサイズの商品がデータベースに存在しません。")
 
 if __name__ == "__main__":
     pass

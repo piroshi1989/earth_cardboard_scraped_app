@@ -1,5 +1,8 @@
+scrapy-splash==0.8.0
+beautifulsoup4==4.12.3
 requests==2.31.0
-beautifulsoup4==4.12.2
-pandas==2.1.1
-streamlit==1.29.0
-pytz==2024.1
+urllib3==2.2.1
+streamlit==1.32.0
+pandas==2.2.1
+numpy==1.26.4
+plotly==5.19.0

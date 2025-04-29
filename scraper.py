@@ -1,12 +1,10 @@
-import urllib3
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-import requests
 import time
 import random
 import logging
+import urllib3
 import re
 from bs4 import BeautifulSoup
+import requests
 from database import Database
 from config import SIZES, BASE_URL, CATEGORY_BASE_URL, HEADERS, QUANTITIES
 from proxy_manager import ProxyManager
@@ -15,59 +13,78 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class Scraper:
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update(HEADERS)
+        self.proxy_manager = ProxyManager()
         self.db = Database()
         self.base_url = BASE_URL
         self.category_base_url = CATEGORY_BASE_URL
-        self.proxy_manager = ProxyManager()
-        self.proxies = self.proxy_manager.get_working_proxies()
-        
-        # リトライ設定を追加
-        retry_strategy = Retry(
-            total=3,  # 最大リトライ回数
-            backoff_factor=1,  # リトライ間隔
-            status_forcelist=[500, 502, 503, 504]  # リトライするステータスコード
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
+        self.session = None
+        self._init_session()
 
-    def _make_request(self, url):
-        """リクエストを送信し、レスポンスを返す"""
+    def _init_session(self):
+        """セッションの初期化"""
         try:
-            if self.proxies:
-                proxy = random.choice(self.proxies)
-                self.session.proxies = {
-                    'http': proxy,
-                    'https': proxy
-                }
+            # プロキシのテスト
+            working_proxies = self.proxy_manager.get_working_proxies()
+            if not working_proxies:
+                raise Exception("動作するプロキシが見つかりません")
+
+            # 最適なプロキシを取得
+            best_proxy = self.proxy_manager.get_best_proxy()
+            if not best_proxy:
+                raise Exception("最適なプロキシが見つかりません")
+
+            logging.info(f"最適なプロキシを使用: {best_proxy}")
             
-            # リクエスト前にランダムな待機時間を設定
-            time.sleep(random.uniform(3, 7))
-            
-            # SSL証明書の検証を無効化し、タイムアウトを設定
-            response = self.session.get(
-                url,
-                verify=False,
-                timeout=30,
-                headers=self.session.headers
-            )
-            response.raise_for_status()
-            return response
-        except requests.exceptions.RequestException as e:
-            logging.error(f"リクエストエラー: {str(e)}")
-            # エラーが発生した場合、プロキシを切り替えて再試行
-            if self.proxies and len(self.proxies) > 1:
-                self.proxies.remove(proxy)
-                logging.info(f"プロキシを切り替えて再試行します。残りのプロキシ数: {len(self.proxies)}")
-                return self._make_request(url)
+        except Exception as e:
+            logging.error(f"セッションの初期化に失敗: {str(e)}")
             raise
+
+    def make_request(self, url, max_retries=3, unit=None):
+        """Splashを使用してリクエストを送信"""
+        splash_url = "http://localhost:8050/render.html"
+        params = {
+            "url": url,
+            "wait": 2,  # ページの読み込み待機時間（秒）
+            "timeout": 30,
+            "proxy": self.proxy_manager.get_best_proxy() if self.proxy_manager.get_best_proxy() else None
+        }
+        
+        # タブ切り替えのためのJavaScriptを追加
+        if unit:
+            params["lua_source"] = f"""
+            function main(splash)
+                splash:go(splash.args.url)
+                splash:wait(2)
+                -- タブをクリック
+                splash:runjs("document.getElementById('unit_{unit}').click()")
+                splash:wait(2)
+                return splash:html()
+            end
+            """
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(splash_url, params=params, headers=HEADERS)
+                response.raise_for_status()
+                return response
+            except Exception as e:
+                logging.warning(f"リクエスト失敗 (試行 {attempt + 1}/{max_retries}): {str(e)}")
+                if attempt < max_retries - 1:
+                    time.sleep(random.uniform(2, 5))
+                else:
+                    raise
 
     def _extract_size_from_url(self, url):
         """URLからサイズ情報を抽出"""
-        size_match = re.search(r'/([A-Z]\d+)/', url)
-        return size_match.group(1) if size_match else None
+        try:
+            size_match = re.search(r'/([A-Z]\d+)/', url)
+            if size_match:
+                return size_match.group(1)
+            logging.warning(f"URLからサイズ情報を抽出できませんでした: {url}")
+            return None
+        except Exception as e:
+            logging.error(f"サイズ情報の抽出中にエラー: {str(e)}")
+            return None
     
     def get_product_ids(self, size=None):
         """指定されたサイズの商品IDを取得してデータベースに保存"""
@@ -80,6 +97,7 @@ class Scraper:
 
         all_product_ids = []
         for size_type in sizes:
+            page = 1
             category_url = f"{self.category_base_url}{size_type}/"
             logging.info(f"処理中のURL: {category_url}")
 
@@ -89,9 +107,8 @@ class Scraper:
 
             try:
                 while has_next_page:
-                    url = f"{category_url}?page={page}" if page > 1 else category_url
+                    url = f"{category_url}?page={page}"
                     logging.info(f"ページ {page} の処理を開始...")
-                    logging.info(f"URL: {url}")
                     
                     # リクエスト前に待機
                     sleep_time = random.uniform(2, 5)
@@ -100,19 +117,23 @@ class Scraper:
                     
                     # リクエスト実行
                     logging.info("リクエスト送信中...")
-                    response = self._make_request(url)
-                    logging.info(f"ステータスコード: {response.status_code}")
+                    response = self.make_request(url)
+                    
+                    if not response:
+                        logging.error("リクエストが失敗しました")
+                        has_next_page = False
+                        break
                     
                     soup = BeautifulSoup(response.text, 'html.parser')
                     
                     # 商品ボックスの検索
                     result_box = soup.find('div', id='resultBox')
-                    if result_box:
-                        product_boxes = result_box.find_all('div', class_='product_box')
                     if not result_box:
                         logging.warning(f"ページ {page} で商品が見つかりません")
                         has_next_page = False
                         break
+                    
+                    product_boxes = result_box.find_all('div', class_='product_box')
                     
                     # 商品情報の取得
                     for box in product_boxes:
@@ -128,7 +149,7 @@ class Scraper:
                                     product_ids.append({
                                         'id': product_id,
                                         'name': product_name,
-                                        'url': product_url  # URLを追加
+                                        'url': product_url
                                     })
                                     logging.info(f"商品IDを取得: {product_id} - {product_name}")
                         except Exception as e:
@@ -146,7 +167,6 @@ class Scraper:
 
                     # 次のページの確認
                     next_page_link = soup.find('li', class_='next_page')
-
                     if not next_page_link:
                         logging.info("次のページが見つかりません。ページネーション終了")
                         has_next_page = False
@@ -163,116 +183,112 @@ class Scraper:
     def _get_numeric(self, soup, label):
         """数値データを取得"""
         logging.info(f"数値データの取得を開始: {label}")
-        
-        selectors = {
-            '外形 三辺合計': {
-                'selector': 'dt:contains("3辺外寸合計") + dd a',
-                'process': lambda text: float(text.split()[0]) if text else None
-            },
-            '長さ (内寸)': {
-                'selector': 'dt:contains("内寸法") + dd',
-                'process': lambda text: float(text.split('×')[0]) if text else None
-            },
-            '幅 (内寸)': {
-                'selector': 'dt:contains("内寸法") + dd',
-                'process': lambda text: float(text.split('×')[1]) if text else None
-            },
-            '深さ (内寸)': {
-                'selector': 'dt:contains("内寸法") + dd',
-                'process': lambda text: float(text.split('×')[2].split('(')[0]) if text else None
-            },
-            '長さ (外寸)': {
-                'selector': 'dt:contains("外寸法") + dd',
-                'process': lambda text: float(text.split('×')[0]) if text else None
-            },
-            '幅 (外寸)': {
-                'selector': 'dt:contains("外寸法") + dd',
-                'process': lambda text: float(text.split('×')[1]) if text else None
-            },
-            '深さ (外寸)': {
-                'selector': 'dt:contains("外寸法") + dd',
-                'process': lambda text: float(text.split('×')[2].split('(')[0]) if text else None
-            }
-        }
+        details_box = soup.find('div', id='detailsBox')
+        if not details_box:
+            logging.warning("detailsBoxが見つかりませんでした")
+            return None
 
-        if label in selectors:
-            selector_info = selectors[label]
-            element = soup.select_one(selector_info['selector'])
-            
-            if element:
-                text = element.text.strip()
-                if 'process' in selector_info:
-                    result = selector_info['process'](text)
+        # 「外寸法」や「内寸法」から分割して取得
+        if label in ["長さ (外寸)", "幅 (外寸)", "深さ (外寸)"]:
+            for dt in details_box.find_all('dt'):
+                dt_text = dt.get_text(strip=True)
+                if "外寸法" in dt_text:
+                    dd = dt.find_next_sibling('dd')
+                    if not dd:
+                        logging.warning(f"外寸法 のdd要素が見つかりませんでした")
+                        return None
+                    text = dd.get_text(strip=True)
+                    # 例: 276×198×28(深さ) mm
+                    m = re.match(r'([\d\.]+)×([\d\.]+)×([\d\.]+)', text)
+                    if m:
+                        if label == "長さ (外寸)":
+                            return float(m.group(1))
+                        elif label == "幅 (外寸)":
+                            return float(m.group(2))
+                        elif label == "深さ (外寸)":
+                            return float(m.group(3))
+                    else:
+                        logging.warning(f"外寸法の数値抽出に失敗: {text}")
+                        return None
+
+        # 「内寸法」も同様
+        if label in ["長さ (内寸)", "幅 (内寸)", "深さ (内寸)"]:
+            for dt in details_box.find_all('dt'):
+                dt_text = dt.get_text(strip=True)
+                if "内寸法" in dt_text:
+                    dd = dt.find_next_sibling('dd')
+                    if not dd:
+                        logging.warning(f"内寸法 のdd要素が見つかりませんでした")
+                        return None
+                    text = dd.get_text(strip=True)
+                    # 例: 305×220×25(深さ) mm
+                    m = re.match(r'([\d\.]+)×([\d\.]+)×([\d\.]+)', text)
+                    if m:
+                        if label == "長さ (内寸)":
+                            return float(m.group(1))
+                        elif label == "幅 (内寸)":
+                            return float(m.group(2))
+                        elif label == "深さ (内寸)":
+                            return float(m.group(3))
+                    else:
+                        logging.warning(f"内寸法の数値抽出に失敗: {text}")
+                        return None
+
+        # それ以外は従来通り
+        for dt in details_box.find_all('dt'):
+            dt_text = dt.get_text(strip=True)
+            if label in dt_text:
+                dd = dt.find_next_sibling('dd')
+                if not dd:
+                    logging.warning(f"{label} のdd要素が見つかりませんでした")
+                    return None
+                a = dd.find('a')
+                text = a.get_text(strip=True) if a else dd.get_text(strip=True)
+                logging.debug(f"{label} の抽出テキスト: {text}")
+                m = re.search(r'([\d\.]+)', text)
+                if m:
+                    result = float(m.group(1))
                     logging.info(f"{label} の取得結果: {result}")
                     return result
-            else:
-                logging.warning(f"{label} の要素が見つかりませんでした")
-                logging.debug(f"HTMLの構造:\n{soup.prettify()[:1000]}")
-                return None
-
-        element = soup.find('th', string=label)
-        if element:
-            value = element.find_next('td').text.strip()
-            result = float(value) if value else None
-            logging.info(f"{label} の取得結果: {result}")
-            return result
-        
-        logging.warning(f"{label} の要素が見つかりませんでした")
+                else:
+                    logging.warning(f"{label} の数値抽出に失敗: {text}")
+                    return None
+        logging.warning(f"{label} のdt要素が見つかりませんでした")
         return None
 
     def _get_text(self, soup, label):
         """テキストデータを取得"""
         logging.info(f"テキストデータの取得を開始: {label}")
         
-        selectors = {
-            '色': {
-                'selector': 'dt:contains("表面色") + dd',
-                'text': True
-            },
-            '形式': {
-                'selector': 'dt:contains("箱形式") + dd a',
-                'text': True
-            },
-            '厚み': {
-                'selector': 'dt:contains("厚さ") + dd',
-                'process': lambda text, soup: (text.strip() + " " + soup.select_one('dt:contains("フルート") + dd').text.strip()) if text else None
-            },
-            '材質': {
-                'selector': 'dt:contains("紙質（強度）") + dd span#more_quality',
-                'text': True
-            }
-        }
-
-        if label in selectors:
-            selector_info = selectors[label]
-            element = soup.select_one(selector_info['selector'])
-            
-            if element:
-                if 'attr' in selector_info:
-                    value = element.get(selector_info['attr'], '').strip()
-                    if 'process' in selector_info:
-                        result = selector_info['process'](value, soup)
-                        logging.info(f"{label} の取得結果: {result}")
-                        return result
-                    logging.info(f"{label} の取得結果: {value}")
-                    return value
-                elif selector_info.get('text', False):
-                    result = element.text.strip()
-                    logging.info(f"{label} の取得結果: {result}")
-                    return result
-                elif 'process' in selector_info:
-                    result = selector_info['process'](element.text, soup)
-                    logging.info(f"{label} の取得結果: {result}")
-                    return result
-            logging.warning(f"{label} の要素が見つかりませんでした")
-            logging.debug(f"HTMLの構造:\n{soup.prettify()[:1000]}")
+        details_box = soup.find('div', id='detailsBox')
+        if not details_box:
+            logging.warning("detailsBoxが見つかりませんでした")
             return None
 
-        element = soup.find('dt', string=label)
-        if element:
-            value = element.find_next('dd').text.strip()
-            logging.info(f"{label} の取得結果: {value}")
-            return value
+        # dt要素の内容をデバッグ出力
+        for dt in details_box.find_all('dt'):
+            dt_text = dt.get_text(strip=True)
+            logging.info(f"dt要素の内容: {dt_text}")
+            if label in dt_text:
+                dd = dt.find_next_sibling('dd')
+                if dd:
+                    # 材質の場合は特別な処理
+                    if label == '紙質（強度）':
+                        quality_span = dd.find('span', id='more_quality')
+                        if quality_span:
+                            text = quality_span.get_text(strip=True)
+                            logging.info(f"{label} の取得結果: {text}")
+                            return text
+                        else:
+                            logging.warning(f"{label} のspan要素が見つかりませんでした")
+                            return None
+                    else:
+                        text = dd.get_text(strip=True)
+                        logging.info(f"{label} の取得結果: {text}")
+                        return text
+                else:
+                    logging.warning(f"{label} のdd要素が見つかりませんでした")
+                    return None
         
         logging.warning(f"{label} の要素が見つかりませんでした")
         return None
@@ -289,62 +305,94 @@ class Scraper:
                 url = f"{self.base_url}{product_id}.html"
                 logging.info(f"商品詳細の取得を開始: {url}")
                 
-                # リクエスト前に待機
-                sleep_time = random.uniform(2, 5)
-                logging.info(f"待機時間: {sleep_time:.2f}秒")
-                time.sleep(sleep_time)
-                
-                # リクエスト実行
-                logging.info("リクエスト送信中...")
-                response = self._make_request(url)
-                logging.info(f"ステータスコード: {response.status_code}")
-                
+                # 1枚単位の価格を取得
+                response = self.make_request(url, unit=1)
                 soup = BeautifulSoup(response.text, 'html.parser')
                 
                 # 商品データの取得
                 data = {
                     '商品コード': product_id,
-                    '商品名': soup.select_one('dt:contains("商品名") + dd').text.strip(),
-                    'サイズ': self._extract_size_from_url(url),
+                    '商品名': self._get_text(soup, '商品名'),
+                    'サイズ': self.db.get_size_type(product_id),
                     'url': url,
-                    '外形_三辺合計': self._get_numeric(soup, '外形 三辺合計'),
+                    '外形_三辺合計': self._get_numeric(soup, '3辺外寸合計'),
                     '長さ_内寸': self._get_numeric(soup, '長さ (内寸)'),
                     '幅_内寸': self._get_numeric(soup, '幅 (内寸)'),
                     '深さ_内寸': self._get_numeric(soup, '深さ (内寸)'),
-                    '製法': self._get_text(soup, '製法'),
+                    '製法': self._get_text(soup, 'フルート'),
                     '長さ_外寸': self._get_numeric(soup, '長さ (外寸)'),
                     '幅_外寸': self._get_numeric(soup, '幅 (外寸)'),
                     '深さ_外寸': self._get_numeric(soup, '深さ (外寸)'),
-                    '加工先': self._get_text(soup, '加工先'),
-                    '色': self._get_text(soup, '色'),
-                    '形式': self._get_text(soup, '形式'),
-                    '厚み': self._get_text(soup, '厚み'),
-                    '材質': self._get_text(soup, '材質'),
-                    '規格幅': self._get_numeric(soup, '規格幅')
+                    '色': self._get_text(soup, '表面色'),
+                    '形式': self._get_text(soup, '箱形式'),
+                    '厚み': self._get_numeric(soup, '厚さ'),
+                    '材質': self._get_text(soup, '紙質（強度）'),
                 }
                 
-                logging.info(f"基本情報の取得完了: {data}")
-
-                # 枚数データの取得
-                for size in QUANTITIES:
-                    logging.info(f"枚数 {size} の価格を取得中...")
-                    price_element = soup.select_one(f'li#small_price1[onclick*="change_volume({size}"]')
-                    if price_element:
-                        price_text = price_element.text.strip()
-                        price = int(re.sub(r'[^\d]', '', price_text.split('円')[0]))
-                        data[f'枚数_{size}'] = price
-                        logging.info(f"枚数 {size} の価格: {price}円")
-                    else:
-                        data[f'枚数_{size}'] = None
-                        logging.warning(f"枚数 {size} の価格が見つかりませんでした")
-
-                logging.info(f"商品データの取得完了: {data}")
+                # 1枚単位の価格情報を取得
+                price_list = soup.find('ul', id='small_price_list')
+                if price_list:
+                    for i in range(1, 21):
+                        price_element = soup.find('li', id=f'small_price{i}')
+                        if price_element:
+                            onclick_text = price_element.get('onclick', '')
+                            match = re.search(r'change_volume\((\d+),\s*(\d+),', onclick_text)
+                            if match:
+                                quantity = int(match.group(1))
+                                price = int(match.group(2))
+                                data[f'{quantity}枚の価格'] = price
+                                logging.info(f"{quantity}枚の価格: {price}円")
+                
+                # 10枚単位の価格を取得
+                response = self.make_request(url, unit=10)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                price_list = soup.find('ul', id='small_price_list')
+                if price_list:
+                    for i in range(1, 21):
+                        price_element = soup.find('li', id=f'small_price{i}')
+                        if price_element:
+                            onclick_text = price_element.get('onclick', '')
+                            match = re.search(r'change_volume\((\d+),\s*(\d+),', onclick_text)
+                            if match:
+                                quantity = int(match.group(1))
+                                price = int(match.group(2))
+                                data[f'{quantity}枚の価格'] = price
+                                logging.info(f"{quantity}枚の価格: {price}円")
+                
+                # big_priceの価格を取得（タブ切り替えなし）
+                response = self.make_request(url)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                for i in range(1, 21):
+                    big_price_element = soup.find('li', id=f'big_price{i}')
+                    if big_price_element:
+                        onclick_text = big_price_element.get('onclick', '')
+                        match = re.search(r'change_volume\((\d+),\s*(\d+),', onclick_text)
+                        if match:
+                            quantity = int(match.group(1))
+                            price = int(match.group(2))
+                            data[f'{quantity}枚の価格'] = price
+                            logging.info(f"{quantity}枚の価格: {price}円")
                 
                 # データベースに保存
                 self.db.save_product(data)
-
-                return data
+                logging.info(f"商品データの取得完了: {data}")
                 
             except Exception as e:
                 logging.error(f"商品 {product_id} の詳細取得中にエラー: {str(e)}")
-                continue 
+                continue
+
+def main():
+    """メイン処理"""
+    try:
+        scraper = Scraper()
+        product_id = "12345"
+        product_info = scraper.get_product_details([product_id])
+        if product_info:
+            print("商品情報を取得しました:", product_info)
+    except Exception as e:
+        print(f"エラーが発生しました: {str(e)}")
+
+if __name__ == "__main__":
+    main() 
