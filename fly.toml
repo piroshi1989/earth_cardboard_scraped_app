@@ -1,8 +1,4 @@
-# fly.toml app configuration file generated for earth-cardboard-scraped-app-wild-forest-9940 on 2025-05-03T14:07:54+09:00
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
-
+# fly.toml
 app = "earth-cardboard-scraped-app"
 primary_region = "nrt"
 
@@ -10,8 +6,7 @@ primary_region = "nrt"
   dockerfile = "Dockerfile"
 
 [processes]
-  app = "streamlit run app.py --server.port=8501 --server.address=0.0.0.0"
-  splash = "splash"
+  app = "/app/entrypoint.sh"
 
 [http_service]
   internal_port = 8501
@@ -37,8 +32,7 @@ primary_region = "nrt"
 [[services]]
   internal_port = 8050
   protocol = "tcp"
-  processes = ["splash"]
-
+　processes = ["splash"]
   [[services.ports]]
     port = 8050
     handlers = ["http"]
