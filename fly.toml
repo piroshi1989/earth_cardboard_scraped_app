@@ -23,7 +23,7 @@ primary_region = "nrt"
 
 [env]
   PORT = "8501"
-  SPLASH_URL = "http://splash:8050"
+  SPLASH_URL = "http://localhost:8050"
 
 [mounts]
   source = "data"
@@ -32,7 +32,8 @@ primary_region = "nrt"
 [[services]]
   internal_port = 8050
   protocol = "tcp"
-　processes = ["splash"]
+  processes = ["app"]
+  
   [[services.ports]]
     port = 8050
     handlers = ["http"]

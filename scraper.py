@@ -9,6 +9,7 @@ from database import Database
 from config import SIZES, BASE_URL, CATEGORY_BASE_URL, HEADERS, QUANTITIES
 from proxy_manager import ProxyManager
 from urllib.parse import urljoin
+import os
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -42,7 +43,8 @@ class Scraper:
 
     def make_request(self, url, unit=None, max_retries=5):
         """Splashを使用してリクエストを送信"""
-        splash_url = "http://splash:8050/execute"  # Docker環境ではサービス名を使用
+        # SplashのURLを環境変数から取得
+        splash_url = os.getenv('SPLASH_URL', 'http://localhost:8050') + '/execute'
         params = {
             "wait": 0.5,
             "images": 1,
