@@ -12,7 +12,17 @@ import pytz
 # JSTタイムゾーンの設定
 jst = pytz.timezone('Asia/Tokyo')
 
-# ログのフォーマッターをカスタマイズ
+# ログディレクトリの作成
+log_dir = 'data/logs'
+os.makedirs(log_dir, exist_ok=True)
+
+# ログの設定
+file_handler = logging.FileHandler(f'{log_dir}/{datetime.now().strftime("%Y%m%d")}.log', mode='a', encoding='utf-8')
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger = logging.getLogger()
+logger.addHandler(file_handler)
+logger.setLevel(logging.INFO)
+
 class JSTFormatter(logging.Formatter):
     def converter(self, timestamp):
         dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
@@ -23,18 +33,6 @@ class JSTFormatter(logging.Formatter):
         if datefmt:
             return dt.strftime(datefmt)
         return dt.strftime('%Y-%m-%d %H:%M:%S %Z')
-
-# ログの設定
-log_formatter = JSTFormatter('%(asctime)s - %(levelname)s - %(message)s')
-file_handler = logging.FileHandler(f'data/logs/{datetime.now().strftime("%Y%m%d")}.log', mode='a', encoding='utf-8')
-file_handler.setFormatter(log_formatter)
-stream_handler = logging.StreamHandler()
-stream_handler.setFormatter(log_formatter)
-
-logging.basicConfig(
-    level=logging.INFO,
-    handlers=[file_handler, stream_handler]
-)
 
 class Database:
     _instance = None
