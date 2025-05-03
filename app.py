@@ -149,7 +149,26 @@ if products:
     if 'updated_at' in products_df.columns:
         products_df['更新日時'] = products_df['updated_at'].apply(format_datetime)
     
-    st.dataframe(products_df)
+    # サイズごとの絞り込み機能
+    st.write("サイズごとの絞り込み")
+    selected_size = st.selectbox(
+        "絞り込みたいサイズを選択",
+        options=[""] + sorted(products_df['サイズ'].unique().tolist()),
+        index=0
+    )
+    
+    if st.button("サイズで絞り込む"):
+        if selected_size:
+            filtered_df = products_df[products_df['サイズ'] == selected_size]
+            st.dataframe(filtered_df)
+            st.write(f"{selected_size}サイズの商品数: {len(filtered_df)}件")
+        else:
+            # サイズが空の場合は全サイズ表示
+            st.dataframe(products_df)
+            st.write(f"全サイズの商品数: {len(products_df)}件")
+    else:
+        # デフォルトで全サイズ表示
+        st.dataframe(products_df)
 else:
     st.info("商品テーブルは空です")
 
@@ -181,12 +200,6 @@ else:
                         for p in product_ids
                     ])
                     st.dataframe(df)
-                    
-                    # サイズごとの絞り込みボタン
-                    if st.button(f"{selected_size}の商品を絞り込む", key="filter_by_size"):
-                        filtered_df = df[df['サイズ'] == selected_size]
-                        st.subheader(f"{selected_size}の商品")
-                        st.dataframe(filtered_df)
                 else:
                     st.error("商品IDの取得に失敗しました。")
             except Exception as e:
