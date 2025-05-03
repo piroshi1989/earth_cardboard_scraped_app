@@ -62,7 +62,8 @@ log_container = st.sidebar.empty()
 
 # ログを更新する関数
 def update_log_display():
-    log_container.text_area("ログ", value=log_stream.getvalue(), height=300, key="log_display")
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_container.text_area("ログ", value=log_stream.getvalue(), height=300, key=f"log_display_{current_time}")
 
 # スクレイパーの初期化
 @st.cache_resource
@@ -186,21 +187,13 @@ else:
                         filtered_df = df[df['サイズ'] == selected_size]
                         st.subheader(f"{selected_size}の商品")
                         st.dataframe(filtered_df)
-                    
-                    # CSVダウンロード
-                    csv = df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="CSVダウンロード",
-                        data=csv,
-                        file_name=f"product_ids_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv",
-                        key="download_product_ids"
-                    )
                 else:
                     st.error("商品IDの取得に失敗しました。")
             except Exception as e:
                 st.error(f"エラーが発生しました: {str(e)}")
                 logging.error(f"商品ID取得中にエラーが発生: {str(e)}", exc_info=True)
+            finally:
+                update_log_display()
 
     # 商品詳細取得
     st.header("②-1 商品詳細取得(複数商品)")
@@ -213,24 +206,36 @@ else:
                     # 進捗バーの設定
                     progress_bar = st.progress(0)
                     total_products = len(stored_products)
+                    status_text = st.empty()
+                    
+                    # 失敗した商品IDを記録するリスト
+                    failed_products = []
                     
                     # 商品詳細の取得
                     all_data = []
                     for i, product in enumerate(stored_products, 1):
                         try:
+                            # 進捗状況の更新
+                            progress = i / total_products
+                            progress_bar.progress(progress)
+                            status_text.text(f"処理中: {i}/{total_products} 件目 ({(progress*100):.1f}%)")
+                            
                             # 商品IDの存在確認
                             if not isinstance(product, dict):
                                 logging.error(f"不正な商品データ形式: {product}")
+                                failed_products.append({"id": str(product), "reason": "不正な商品データ形式"})
                                 continue
                                 
                             product_id = product.get('product_id')
                             if not product_id:
                                 logging.error(f"商品IDが存在しません: {product}")
+                                failed_products.append({"id": str(product), "reason": "商品IDが存在しません"})
                                 continue
                                 
                             # 商品IDの形式確認
                             if not isinstance(product_id, (str, int)):
                                 logging.error(f"不正な商品ID形式: {product_id}")
+                                failed_products.append({"id": str(product_id), "reason": "不正な商品ID形式"})
                                 continue
                                 
                             # 商品IDを文字列に変換
@@ -243,9 +248,11 @@ else:
                                 logging.info(f"商品 {i}/{len(stored_products)} の詳細を取得しました: {product_id}")
                             else:
                                 logging.warning(f"商品 {i}/{len(stored_products)} の詳細を取得できませんでした: {product_id}")
+                                failed_products.append({"id": product_id, "reason": "商品詳細の取得に失敗"})
                                 
                         except Exception as e:
                             logging.error(f"商品 {i}/{len(stored_products)} の処理中にエラー: {str(e)}")
+                            failed_products.append({"id": str(product.get('product_id', '不明')), "reason": str(e)})
                             continue
                     
                     if all_data:
@@ -255,20 +262,26 @@ else:
                         st.subheader("取得した商品詳細")
                         df = pd.DataFrame(all_data)
                         st.dataframe(df)
-                
-                        # CSVダウンロード
-                        csv = df.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            label="CSVダウンロード",
-                            data=csv,
-                            file_name=f"product_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                            mime="text/csv"
-                        )
+                        
+                        # 失敗した商品の表示
+                        if failed_products:
+                            st.warning(f"{len(failed_products)}件の商品の取得に失敗しました。")
+                            st.subheader("失敗した商品一覧")
+                            failed_df = pd.DataFrame(failed_products)
+                            st.dataframe(failed_df)
                     else:
                         st.error("商品詳細の取得に失敗しました。")
+                        if failed_products:
+                            st.subheader("失敗した商品一覧")
+                            failed_df = pd.DataFrame(failed_products)
+                            st.dataframe(failed_df)
                 except Exception as e:
                     st.error(f"エラーが発生しました: {str(e)}")
                     logging.error(f"商品詳細取得中にエラーが発生: {str(e)}", exc_info=True)
+                finally:
+                    update_log_display()
+                    progress_bar.empty()
+                    status_text.empty()
     else:
         st.warning(f"{selected_size}のサイズの商品IDがデータベースに存在しません。")
 
@@ -333,19 +346,13 @@ else:
                         
                         st.dataframe(detail_df)
                         
-                        # CSVダウンロード
-                        csv = detail_df.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            label="CSVダウンロード",
-                            data=csv,
-                            file_name=f"product_detail_{selected_product_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                            mime="text/csv"
-                        )
                     else:
                         st.error("商品詳細の取得に失敗しました。")
                 except Exception as e:
                     st.error(f"エラーが発生しました: {str(e)}")
                     logging.error(f"商品詳細取得中にエラーが発生: {str(e)}", exc_info=True)
+                finally:
+                    update_log_display()
     else:
         st.warning(f"{selected_size}のサイズの商品がデータベースに存在しません。")
 

@@ -8,6 +8,7 @@ import requests
 from database import Database
 from config import SIZES, BASE_URL, CATEGORY_BASE_URL, HEADERS, QUANTITIES
 from proxy_manager import ProxyManager
+from urllib.parse import urljoin
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -39,57 +40,71 @@ class Scraper:
             logging.error(f"セッションの初期化に失敗: {str(e)}")
             raise
 
-    def make_request(self, url, max_retries=5, unit=None):
+    def make_request(self, url, unit=None, max_retries=5):
         """Splashを使用してリクエストを送信"""
-        splash_url = "http://splash:8050/render.html"  # Docker環境ではサービス名を使用
+        splash_url = "http://splash:8050/execute"  # Docker環境ではサービス名を使用
         params = {
+            "wait": 0.5,
+            "images": 1,
+            "expand": 1,
+            "timeout": 90.0,
             "url": url,
-            "wait": 5,  # ページの読み込み待機時間（秒）を延長
-            "timeout": 60,  # タイムアウト時間を延長
-            "proxy": self.proxy_manager.get_best_proxy() if self.proxy_manager.get_best_proxy() else None
+            "proxy": self.proxy_manager.get_best_proxy() or None
         }
         
-        # タブ切り替えのためのJavaScriptを追加
         if unit:
             params["lua_source"] = f"""
-            function main(splash)
-                splash:go(splash.args.url)
-                splash:wait(5)  # 待機時間を延長
-                -- タブをクリック
-                splash:runjs("document.getElementById('unit_{unit}').click()")
-                splash:wait(10)  # 待機時間を延長
-                -- 価格リストが表示されるまで待機
-                splash:runjs([[
-                    function waitForElement() {{
-                        return new Promise((resolve) => {{
-                            const checkElement = () => {{
-                                const element = document.getElementById('small_price_list');
-                                if (element) {{
-                                    resolve();
-                                }} else {{
-                                    setTimeout(checkElement, 1000);
-                                }}
-                            }};
-                            checkElement();
-                        }});
-                    }}
-                    waitForElement();
-                ]])
-                splash:wait(5)  # 追加の待機時間
-                return splash:html()
+            function main(splash, args)
+                splash.private_mode_enabled = false
+                splash.images_enabled = false
+                assert(splash:go(args.url))
+                splash:wait(2)
+
+                -- runjsで #unit_1 を直接クリック
+                splash:runjs("document.querySelector('#unit_{unit}').click();")
+                splash:wait(3)
+
+                -- 1枚表示の price list に切り替わったか確認（特定の onclick を含むか）
+                local max_tries = 5
+                for i = 1, max_tries do
+                    local html = splash:html()
+                    if html:find("change_volume%({unit},") then  -- 「(」は「%(」にエスケープ
+                    break
+                    end
+                    splash:wait(1)
+                end
+
+                return {{ html = splash:html() }}
             end
             """
         
+        else:
+            params["lua_source"] = f"""
+            function main(splash, args)
+                splash.private_mode_enabled = false
+                splash.images_enabled = false
+                assert(splash:go(args.url))
+                splash:wait(2)
+
+                return {{ html = splash:html() }}
+            end
+            """
+
         for attempt in range(max_retries):
             try:
-                response = requests.get(splash_url, params=params, headers=HEADERS, timeout=60)  # リクエストのタイムアウトも延長
+                response = requests.get(splash_url, params=params, headers=HEADERS, timeout=90)
                 response.raise_for_status()
+                
+                # レスポンスの内容をログ出力
+                logging.info(f"レスポンスのステータスコード: {response.status_code}")
+                logging.info(f"レスポンスの内容の長さ: {len(response.text)}")
+                
                 return response
             except Exception as e:
                 if attempt == 0:  # 最初の試行でのみログを出力
                     logging.warning(f"リクエスト失敗 (試行 {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt < max_retries - 1:
-                    time.sleep(random.uniform(5, 10))  # リトライ間隔を延長
+                    time.sleep(random.uniform(2, 5))  # リトライ間隔を調整
                 else:
                     raise
 
@@ -115,18 +130,27 @@ class Scraper:
         logging.info(f"取得対象のサイズ: {sizes}")
 
         all_product_ids = []
+        page = 1
         for size_type in sizes:
-            page = 1
             category_url = f"{self.category_base_url}{size_type}/"
             logging.info(f"処理中のURL: {category_url}")
 
             product_ids = []
-            page = 1
+            
             has_next_page = True
+            processed_urls = set()  # 処理済みURLを記録
 
             try:
                 while has_next_page:
                     url = f"{category_url}?page={page}"
+                    
+                    # 既に処理済みのURLの場合はスキップ
+                    if url in processed_urls:
+                        logging.warning(f"URLが既に処理済みです: {url}")
+                        has_next_page = False
+                        break
+                    
+                    processed_urls.add(url)
                     logging.info(f"ページ {page} の処理を開始...")
                     
                     # リクエスト前に待機
@@ -143,7 +167,7 @@ class Scraper:
                         has_next_page = False
                         break
                     
-                    soup = BeautifulSoup(response.text, 'html.parser')
+                    soup = BeautifulSoup(response.text.encode('utf-8').decode('unicode_escape'), 'html.parser')
                     
                     # 商品ボックスの検索
                     result_box = soup.find('div', id='resultBox')
@@ -159,36 +183,46 @@ class Scraper:
                         try:
                             product_name = box.find('h4')
                             product_name = product_name.text.strip() if product_name else ""
+
                             
                             product_id_element = box.find('li', class_='product_id')
                             if product_id_element:
                                 product_id = product_id_element.get('id')
                                 if product_id:
-                                    product_url = f"{self.base_url}{product_id}.html"
-                                    product_ids.append({
+                                    # 既に取得済みの商品IDはスキップ
+                                    if any(p['id'] == product_id for p in product_ids):
+                                        logging.info(f"商品ID {product_id} は既に取得済みです")
+                                        continue
+
+                                    product_url_tag = box.find('a')
+                                    relative_url = product_url_tag['href'] if product_url_tag and product_url_tag.has_attr('href') else None
+                                    full_url = urljoin(BASE_URL, relative_url) if relative_url else None
+                                    
+                                    product_data = {
                                         'id': product_id,
                                         'name': product_name,
-                                        'url': product_url
-                                    })
+                                        'url': full_url
+                                    }
+                                    product_ids.append(product_data)
                                     logging.info(f"商品IDを取得: {product_id} - {product_name}")
                         except Exception as e:
                             logging.error(f"商品情報の取得中にエラー: {str(e)}")
                             continue
-
-                    # 商品IDをデータベースに保存
-                    if product_ids:
-                        self.db.save_product_ids(product_ids, size_type)
-                        all_product_ids.extend(product_ids)
-                        logging.info(f"サイズ {size_type} の商品ID {len(product_ids)} 件を保存しました")
-                    else:
-                        logging.warning(f"サイズ {size_type} の商品が見つかりませんでした")
-                        has_next_page = False         
 
                     # 次のページの確認
                     next_page_link = soup.find('li', class_='next_page')
                     if not next_page_link:
                         logging.info("次のページが見つかりません。ページネーション終了")
                         has_next_page = False
+
+                        # 商品IDをデータベースに保存
+                        if product_ids:
+                            self.db.save_product_ids(product_ids, size_type)
+                            all_product_ids.extend(product_ids)
+                            logging.info(f"サイズ {size_type} の商品ID {len(product_ids)} 件を保存しました")
+                        else:
+                            logging.warning(f"サイズ {size_type} の商品が見つかりませんでした")
+                            has_next_page = False
                     else:
                         page += 1
                         logging.info(f"次のページに移動します: {page}")
@@ -318,19 +352,43 @@ class Scraper:
             product_ids = self.db.get_all_product_ids()
         
         logging.info(f"取得対象の商品数: {len(product_ids)}")
+        all_data = []  # 全商品のデータを格納するリスト
         
         for product_id in product_ids:
             try:
-                url = f"{self.base_url}{product_id}.html"
+                urls = self.db.get_url_by_product_id(product_id)
+                if not urls:
+                    logging.error(f"商品ID {product_id} のURLが見つかりません")
+                    continue
+                    
+                url = urls[0]['url']
                 logging.info(f"商品詳細の取得を開始: {url}")
                 
                 # 1枚単位の価格を取得
-                response = self.make_request(url, unit=1)
-                soup = BeautifulSoup(response.text, 'html.parser')
+                max_retries = 3  # 最大再試行回数
+                for attempt in range(max_retries):
+                    response = self.make_request(url, unit=1)
+                    soup = BeautifulSoup(response.text.encode('utf-8').decode('unicode_escape'), 'html.parser')
+                    
+                    # タブが正しく切り替わっているか確認
+                    price_element = soup.find('li', id='small_price1')
+                    if price_element and 'onclick' in price_element.attrs:
+                        onclick_text = price_element['onclick']
+                        if 'change_volume(1,' in onclick_text:
+                            break
+                        else:
+                            logging.warning(f"1枚表示の価格要素が見つかりません。再試行 {attempt + 1}/{max_retries}")
+                    else:
+                        logging.warning(f"価格要素が見つかりません。再試行 {attempt + 1}/{max_retries}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2)  # 再試行前に少し待機
+                    else:
+                        logging.error("1枚表示の価格要素を取得できませんでした。")
+                        continue
                 
                 # 商品データの取得
                 data = {
-                    '商品コード': product_id,
+                    '商品コード': product_id,  # データベースのカラム名に合わせて変更
                     '商品名': self._get_text(soup, '商品名'),
                     'サイズ': self.db.get_size_type(product_id),
                     'url': url,
@@ -348,90 +406,90 @@ class Scraper:
                     '材質': self._get_text(soup, '紙質（強度）'),
                 }
                 
-                # 価格情報の取得
-                price_data = {}
-                
                 # 1枚単位の価格情報を取得
                 price_list = soup.find('ul', id='small_price_list')
                 if price_list:
-                    for i in range(1, 21):
+                    MAX_ITERATIONS = 120
+                    i = 1
+                    while i <= MAX_ITERATIONS:
                         price_element = soup.find('li', id=f'small_price{i}')
-                        if price_element:
-                            onclick_text = price_element.get('onclick', '')
-                            match = re.search(r'change_volume\((\d+),\s*(\d+),', onclick_text)
-                            if match:
-                                quantity = int(match.group(1))
-                                price = int(match.group(2))
-                                price_data[quantity] = price
-                                logging.info(f"{quantity}枚の価格を取得: {price}円")
-                            else:
-                                logging.warning(f"small_price{i} の要素が見つかりませんでした")
-                                continue
+                        if not price_element:
+                            break
+                            
+                        onclick_text = price_element.get('onclick', '')
+                        match = re.search(r'change_volume\((\d+),\s*(\d+),', onclick_text)
+                        if match:
+                            quantity = int(match.group(1))
+                            price = int(match.group(2))
+                            data[f'{quantity}枚の価格'] = price  # データベースのカラム名に合わせて変更
+                            logging.info(f"{quantity}枚の価格を取得: {price}円")
+                            i += 1
                         else:
-                            logging.warning(f"small_price{i} の要素が見つかりませんでした")
-                            continue
+                            break
+                
                 # 10枚単位の価格を取得
                 response = self.make_request(url, unit=10)
-                soup = BeautifulSoup(response.text, 'html.parser')
+                soup = BeautifulSoup(response.text.encode('utf-8').decode('unicode_escape'), 'html.parser')
                 
                 price_list = soup.find('ul', id='small_price_list')
                 if price_list:
-                    for i in range(1, 21):
+                    MAX_ITERATIONS = 120
+                    i = 1
+                    while i <= MAX_ITERATIONS:
                         price_element = soup.find('li', id=f'small_price{i}')
-                        if price_element:
-                            onclick_text = price_element.get('onclick', '')
-                            match = re.search(r'change_volume\((\d+),\s*(\d+),', onclick_text)
-                            if match:
-                                quantity = int(match.group(1))
-                                price = int(match.group(2))
-                                price_data[quantity] = price
-                                logging.info(f"{quantity}枚の価格を取得: {price}円")
+                        if not price_element:
+                            break
+                            
+                        onclick_text = price_element.get('onclick', '')
+                        match = re.search(r'change_volume\((\d+),\s*(\d+),', onclick_text)
+                        if match:
+                            quantity = int(match.group(1))
+                            price = int(match.group(2))
+                            data[f'{quantity}枚の価格'] = price  # データベースのカラム名に合わせて変更
+                            logging.info(f"{quantity}枚の価格を取得: {price}円")
+                            i += 1
                         else:
-                            logging.warning(f"small_price{i} の要素が見つかりませんでした")
-                            continue
-                    else:
-                        logging.warning(f"small_price{i} の要素が見つかりませんでした")
-                        continue
+                            break
                 
-                # big_priceの価格を取得（タブ切り替えなし）
-                response = self.make_request(url)
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                for i in range(1, 21):
-                    big_price_element = soup.find('li', id=f'big_price{i}')
-                    if big_price_element:
+                # big_priceの価格を取得
+                big_price_list = soup.find('ul', id='big_price_list')
+                if big_price_list:
+                    MAX_ITERATIONS = 120
+                    i = 1
+                    while i <= MAX_ITERATIONS:
+                        big_price_element = soup.find('li', id=f'big_price{i}')
+                        if not big_price_element:
+                            break
                         onclick_text = big_price_element.get('onclick', '')
                         match = re.search(r'change_volume\((\d+),\s*(\d+),', onclick_text)
                         if match:
                             quantity = int(match.group(1))
                             price = int(match.group(2))
-                            price_data[quantity] = price
+                            data[f'{quantity}枚の価格'] = price  # データベースのカラム名に合わせて変更
                             logging.info(f"{quantity}枚の価格を取得: {price}円")
+                            i += 1
                         else:
-                            logging.warning(f"big_price{i} の要素が見つかりませんでした")
-                            continue
-                    else:
-                        logging.warning(f"big_price{i} の要素が見つかりませんでした")
-                        continue
-                
-                # 価格データを統合
-                for quantity, price in price_data.items():
-                    data[f'{quantity}枚の価格'] = price
+                            break
                 
                 # データベースに保存
                 self.db.save_product(data)
                 logging.info(f"商品データの取得完了: {product_id}")
                 
+                # 取得したデータをリストに追加
+                all_data.append(data)
+                
             except Exception as e:
                 logging.error(f"商品 {product_id} の詳細取得中にエラー: {str(e)}")
                 continue
+        
+        return all_data  # 取得した全商品のデータを返す
 
 def main():
     """メイン処理"""
     try:
         scraper = Scraper()
         product_id = "12345"
-        product_info = scraper.get_product_details([product_id])
+        product_info = scraper.get_product_details(product_id)
         if product_info:
             print("商品情報を取得しました:", product_info)
     except Exception as e:

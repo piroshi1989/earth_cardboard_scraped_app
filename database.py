@@ -129,7 +129,7 @@ class Database:
             cursor = conn.cursor()
             
             # 既存の商品をチェック
-            cursor.execute('SELECT id FROM products WHERE product_id = ?', (product_data['商品コード'],))
+            cursor.execute('SELECT * FROM products WHERE product_id = ?', (product_data['商品コード'],))
             existing = cursor.fetchone()
             
             # カラム名と値のマッピング
@@ -162,6 +162,13 @@ class Database:
                     price_data[f'price_{quantity}'] = value
             
             if existing:
+                # 価格データの変更をチェック
+                price_changed = False
+                for col, val in price_data.items():
+                    if existing[col] != val:
+                        price_changed = True
+                        break
+                
                 # 空でない値だけを更新対象にする
                 columns = []
                 values = []
@@ -185,6 +192,10 @@ class Database:
                 '''
                 values.append(product_data['商品コード'])
                 cursor.execute(sql, values)
+                
+                # 価格データが変更された場合のみログを出力
+                if price_changed:
+                    logging.info(f"商品情報を更新しました（価格変更）: {product_data['商品コード']}")
             else:
                 # 挿入時は従来通り
                 columns = list(column_mapping.keys()) + list(price_data.keys()) + ['created_at', 'updated_at']
@@ -199,9 +210,9 @@ class Database:
                 values = [product_data.get(column_mapping[col]) for col in column_mapping.keys()]
                 values.extend(price_data.values())
                 cursor.execute(sql, values)
+                logging.info(f"商品情報を新規保存しました: {product_data['商品コード']}")
             
             conn.commit()
-            logging.info(f"商品情報を保存しました: {product_data['商品コード']}")
             
         except sqlite3.Error as e:
             logging.error(f"商品情報の保存中にエラーが発生: {str(e)}")
@@ -278,6 +289,22 @@ class Database:
             return []
         finally:
             cursor.close()
+
+    def get_url_by_product_id(self, product_id):
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            if product_id is not None:
+                cursor.execute('SELECT url FROM products WHERE product_id = ?', (product_id,))
+            else:
+                cursor.execute('SELECT url FROM products')
+            return cursor.fetchall()
+        except sqlite3.Error as e:
+            logging.error(f"商品URLの取得中にエラーが発生: {str(e)}")
+            return []
+        finally:
+            cursor.close()
+
 
     def close(self):
         """データベース接続を閉じる"""

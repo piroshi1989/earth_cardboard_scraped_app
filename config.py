@@ -11,59 +11,7 @@ SIZES = [
 ]
 
 # 枚数のリスト
-QUANTITIES = [
-    1,
-    2,
-    3,
-    4,
-    5,
-    6,
-    7,
-    8,
-    9,
-    10,
-    20,
-    30,
-    40,
-    50,
-    60,
-    70,
-    80,
-    100,
-    110,
-    120,
-    130,
-    140,
-    150,
-    160,
-    170,
-    180,
-    190,
-    200,
-    300,
-    400,
-    500,
-    600,
-    700,
-    800,
-    900,
-    1000,
-    1400,
-    1600,
-    1800,
-    2000,
-    2200,
-    2400,
-    2600,
-    2800,
-    3000,
-    3200,
-    3400,
-    3600,
-    3800,
-    4000,
-    4200,
-] 
+QUANTITIES = [i for i in range(1, 10)] + [i for i in range(10, 4210, 10)]
 
 # プロキシ設定
 PROXY_CONFIGS = [
@@ -115,7 +63,7 @@ HEADERS = {
 }
 
 # 商品詳細ページのURL
-BASE_URL = 'https://www.bestcarton.com/cardboard/box/'
+BASE_URL = 'https://www.bestcarton.com'
 
 # カテゴリページのURL
 CATEGORY_BASE_URL = 'https://www.bestcarton.com/category/size/'
