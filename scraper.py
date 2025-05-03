@@ -75,22 +75,15 @@ class Scraper:
                 
                 if unit:
                     # 単位切り替えボタンをクリック
-                    try:
-                        # 要素が存在することを確認
-                        unit_button = WebDriverWait(self.driver, 10).until(
-                            EC.presence_of_element_located((By.ID, f"unit_{unit}"))
-                        )
-                        
-                        # JavaScriptを使用してクリックを実行
-                        self.driver.execute_script("arguments[0].click();", unit_button)
-                        
-                        # 価格リストの更新を待機
-                        WebDriverWait(self.driver, 10).until(
-                            lambda driver: "change_volume(" in driver.page_source
-                        )
-                    except Exception as e:
-                        logging.warning(f"単位切り替えボタンのクリックに失敗: {str(e)}")
-                        raise
+                    unit_button = WebDriverWait(self.driver, 10).until(
+                        EC.element_to_be_clickable((By.ID, f"unit_{unit}"))
+                    )
+                    unit_button.click()
+                    
+                    # 価格リストの更新を待機
+                    WebDriverWait(self.driver, 10).until(
+                        lambda driver: "change_volume(" in driver.page_source
+                    )
                 
                 # ページの読み込みを待機
                 time.sleep(2)
@@ -379,32 +372,24 @@ class Scraper:
                 # 1枚単位の価格を取得
                 max_retries = 3  # 最大再試行回数
                 for attempt in range(max_retries):
-                    try:
-                        response = self.make_request(url, unit=1)
-                        if not response:
-                            logging.error("リクエストが失敗しました")
-                            continue
-                            
-                        soup = BeautifulSoup(response.text, 'html.parser')
-                        
-                        # タブが正しく切り替わっているか確認
-                        price_element = soup.find('li', id='small_price1')
-                        if price_element and 'onclick' in price_element.attrs:
-                            onclick_text = price_element['onclick']
-                            if 'change_volume(1,' in onclick_text:
-                                break
-                            else:
-                                logging.warning(f"1枚表示の価格要素が見つかりません。再試行 {attempt + 1}/{max_retries}")
+                    response = self.make_request(url, unit=1)
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    
+                    # タブが正しく切り替わっているか確認
+                    price_element = soup.find('li', id='small_price1')
+                    if price_element and 'onclick' in price_element.attrs:
+                        onclick_text = price_element['onclick']
+                        if 'change_volume(1,' in onclick_text:
+                            break
                         else:
-                            logging.warning(f"価格要素が見つかりません。再試行 {attempt + 1}/{max_retries}")
-                    except Exception as e:
-                        logging.error(f"1枚単位の価格取得中にエラー: {str(e)}")
-                        if attempt < max_retries - 1:
-                            time.sleep(2)  # 再試行前に少し待機
-                            continue
-                        else:
-                            logging.error("1枚表示の価格要素を取得できませんでした。")
-                            continue
+                            logging.warning(f"1枚表示の価格要素が見つかりません。再試行 {attempt + 1}/{max_retries}")
+                    else:
+                        logging.warning(f"価格要素が見つかりません。再試行 {attempt + 1}/{max_retries}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2)  # 再試行前に少し待機
+                    else:
+                        logging.error("1枚表示の価格要素を取得できませんでした。")
+                        continue
                 
                 # 商品データの取得
                 data = {
