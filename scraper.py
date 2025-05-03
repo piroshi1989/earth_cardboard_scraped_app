@@ -42,7 +42,7 @@ class Scraper:
 
     def make_request(self, url, unit=None, max_retries=5):
         """Splashを使用してリクエストを送信"""
-        splash_url = "http://splash:8050/execute"  # Docker環境ではサービス名を使用
+        splash_url = "http://127.0.0.1:8050/execute"
         params = {
             "wait": 0.5,
             "images": 1,

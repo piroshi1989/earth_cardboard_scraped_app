@@ -31,13 +31,4 @@ RUN mkdir -p /app/data
 EXPOSE 8501 8050
 
 # ヘルスチェック
-HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
-
-# 起動スクリプトの作成
-RUN echo '#!/bin/bash\n\
-splash &\n\
-streamlit run app.py --server.port=8501 --server.address=0.0.0.0' > /app/start.sh && \
-chmod +x /app/start.sh
-
-# アプリケーションの起動
-ENTRYPOINT ["/app/start.sh"] 
+HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health 
