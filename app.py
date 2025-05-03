@@ -78,6 +78,20 @@ db = Database()
 # メインコンテンツの前に追加
 st.header("データベースの内容")
 
+# データベースリセットボタン
+if st.button("データベースをリセット"):
+    try:
+        db_path = 'data/database.db'
+        if os.path.exists(db_path):
+            os.remove(db_path)
+            st.success("データベースをリセットしました。ページをリロードしてください。")
+            st.experimental_rerun()
+        else:
+            st.warning("データベースファイルが存在しません。")
+    except Exception as e:
+        st.error(f"データベースのリセット中にエラーが発生しました: {str(e)}")
+        logging.error(f"データベースのリセット中にエラーが発生: {str(e)}")
+
 # 商品IDテーブルの表示
 # productsテーブルの表示
 st.subheader("商品テーブル")
