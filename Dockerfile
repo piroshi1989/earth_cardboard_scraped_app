@@ -8,6 +8,11 @@ RUN apt-get update && apt-get install -y \
     curl \
     software-properties-common \
     git \
+    python3-pip \
+    python3-dev \
+    libpq-dev \
+    python3-pyqt5 \
+    python3-pyqt5.qtwebkit \
     && rm -rf /var/lib/apt/lists/*
 
 # 必要なPythonパッケージのインストール
@@ -15,11 +20,7 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 # Splashサーバーのインストール
-RUN apt-get update && apt-get install -y \
-    python3-pip \
-    python3-dev \
-    libpq-dev \
-    && pip3 install splash
+RUN pip3 install splash
 
 # アプリケーションのコピー
 COPY . .
