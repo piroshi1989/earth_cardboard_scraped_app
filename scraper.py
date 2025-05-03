@@ -33,23 +33,35 @@ class Scraper:
         """Seleniumドライバーの初期化"""
         try:
             chrome_options = Options()
-            chrome_options.add_argument('--headless')  # ヘッドレスモード
+            chrome_options.add_argument('--headless=new')
             chrome_options.add_argument('--no-sandbox')
             chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--disable-extensions')
+            chrome_options.add_argument('--disable-software-rasterizer')
             
-            # プロキシの設定
-            best_proxy = self.proxy_manager.get_best_proxy()
-            if best_proxy:
-                chrome_options.add_argument(f'--proxy-server={best_proxy}')
+            # プロキシの設定（一時的に無効化）
+            # best_proxy = self.proxy_manager.get_best_proxy()
+            # if best_proxy:
+            #     chrome_options.add_argument(f'--proxy-server={best_proxy}')
             
-            service = Service(ChromeDriverManager().install())
+            # ChromeDriverの設定
+            service = Service(executable_path='/usr/bin/chromedriver')
             self.driver = webdriver.Chrome(service=service, options=chrome_options)
-            self.driver.set_page_load_timeout(90)
             
+            # タイムアウト設定を調整
+            self.driver.set_page_load_timeout(30)
+            self.driver.set_script_timeout(30)
+            
+            # 初期化確認
+            self.driver.get('about:blank')
             logging.info("Seleniumドライバーの初期化が完了しました")
             
         except Exception as e:
             logging.error(f"Seleniumドライバーの初期化に失敗: {str(e)}")
+            if self.driver:
+                self.driver.quit()
             raise
 
     def make_request(self, url, unit=None, max_retries=5):
@@ -63,15 +75,22 @@ class Scraper:
                 
                 if unit:
                     # 単位切り替えボタンをクリック
-                    unit_button = WebDriverWait(self.driver, 10).until(
-                        EC.element_to_be_clickable((By.ID, f"unit_{unit}"))
-                    )
-                    unit_button.click()
-                    
-                    # 価格リストの更新を待機
-                    WebDriverWait(self.driver, 10).until(
-                        lambda driver: "change_volume(" in driver.page_source
-                    )
+                    try:
+                        # 要素が存在することを確認
+                        unit_button = WebDriverWait(self.driver, 10).until(
+                            EC.presence_of_element_located((By.ID, f"unit_{unit}"))
+                        )
+                        
+                        # JavaScriptを使用してクリックを実行
+                        self.driver.execute_script("arguments[0].click();", unit_button)
+                        
+                        # 価格リストの更新を待機
+                        WebDriverWait(self.driver, 10).until(
+                            lambda driver: "change_volume(" in driver.page_source
+                        )
+                    except Exception as e:
+                        logging.warning(f"単位切り替えボタンのクリックに失敗: {str(e)}")
+                        raise
                 
                 # ページの読み込みを待機
                 time.sleep(2)
@@ -83,6 +102,7 @@ class Scraper:
                 response = requests.Response()
                 response._content = html.encode('utf-8')
                 response.status_code = 200
+                response.encoding = 'utf-8'
                 
                 return response
                 
@@ -158,7 +178,8 @@ class Scraper:
                         has_next_page = False
                         break
                     
-                    soup = BeautifulSoup(response.text.encode('utf-8').decode('unicode_escape'), 'html.parser')
+                    # エンコーディングを修正
+                    soup = BeautifulSoup(response.text, 'html.parser')
                     
                     # 商品ボックスの検索
                     result_box = soup.find('div', id='resultBox')
@@ -358,24 +379,32 @@ class Scraper:
                 # 1枚単位の価格を取得
                 max_retries = 3  # 最大再試行回数
                 for attempt in range(max_retries):
-                    response = self.make_request(url, unit=1)
-                    soup = BeautifulSoup(response.text.encode('utf-8').decode('unicode_escape'), 'html.parser')
-                    
-                    # タブが正しく切り替わっているか確認
-                    price_element = soup.find('li', id='small_price1')
-                    if price_element and 'onclick' in price_element.attrs:
-                        onclick_text = price_element['onclick']
-                        if 'change_volume(1,' in onclick_text:
-                            break
+                    try:
+                        response = self.make_request(url, unit=1)
+                        if not response:
+                            logging.error("リクエストが失敗しました")
+                            continue
+                            
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        
+                        # タブが正しく切り替わっているか確認
+                        price_element = soup.find('li', id='small_price1')
+                        if price_element and 'onclick' in price_element.attrs:
+                            onclick_text = price_element['onclick']
+                            if 'change_volume(1,' in onclick_text:
+                                break
+                            else:
+                                logging.warning(f"1枚表示の価格要素が見つかりません。再試行 {attempt + 1}/{max_retries}")
                         else:
-                            logging.warning(f"1枚表示の価格要素が見つかりません。再試行 {attempt + 1}/{max_retries}")
-                    else:
-                        logging.warning(f"価格要素が見つかりません。再試行 {attempt + 1}/{max_retries}")
-                    if attempt < max_retries - 1:
-                        time.sleep(2)  # 再試行前に少し待機
-                    else:
-                        logging.error("1枚表示の価格要素を取得できませんでした。")
-                        continue
+                            logging.warning(f"価格要素が見つかりません。再試行 {attempt + 1}/{max_retries}")
+                    except Exception as e:
+                        logging.error(f"1枚単位の価格取得中にエラー: {str(e)}")
+                        if attempt < max_retries - 1:
+                            time.sleep(2)  # 再試行前に少し待機
+                            continue
+                        else:
+                            logging.error("1枚表示の価格要素を取得できませんでした。")
+                            continue
                 
                 # 商品データの取得
                 data = {
@@ -420,7 +449,7 @@ class Scraper:
                 
                 # 10枚単位の価格を取得
                 response = self.make_request(url, unit=10)
-                soup = BeautifulSoup(response.text.encode('utf-8').decode('unicode_escape'), 'html.parser')
+                soup = BeautifulSoup(response.text, 'html.parser')
                 
                 price_list = soup.find('ul', id='small_price_list')
                 if price_list:
