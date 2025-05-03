@@ -1,0 +1,23 @@
+app = "earth-cardboard-splash"
+primary_region = "nrt"
+
+[build]
+  dockerfile = "Dockerfile.splash"
+
+[env]
+  SPLASH_TIMEOUT = "60"
+  SPLASH_SLOTS = "10"
+  SPLASH_MAX_TIMEOUT = "90"
+
+[http_service]
+  internal_port = 8050
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["splash"]
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 2048 
