@@ -17,6 +17,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import TimeoutException
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -74,16 +75,20 @@ class Scraper:
                 )
                 
                 if unit:
-                    # 単位切り替えボタンをクリック
-                    unit_button = WebDriverWait(self.driver, 10).until(
-                        EC.element_to_be_clickable((By.ID, f"unit_{unit}"))
-                    )
-                    unit_button.click()
-                    
-                    # 価格リストの更新を待機
-                    WebDriverWait(self.driver, 10).until(
-                        lambda driver: "change_volume(" in driver.page_source
-                    )
+                    try:
+                        # 単位切り替えボタンが存在するか確認
+                        unit_button = WebDriverWait(self.driver, 5).until(
+                            EC.element_to_be_clickable((By.ID, f"unit_{unit}"))
+                        )
+                        unit_button.click()
+                        
+                        # 価格リストの更新を待機
+                        WebDriverWait(self.driver, 10).until(
+                            lambda driver: "change_volume(" in driver.page_source
+                        )
+                    except TimeoutException:
+                        logging.info(f"unit_{unit} ボタンが存在しないためスキップします")
+                        # スキップして次の処理へ
                 
                 # ページの読み込みを待機
                 time.sleep(2)
