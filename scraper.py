@@ -10,6 +10,13 @@ from config import SIZES, BASE_URL, CATEGORY_BASE_URL, HEADERS, QUANTITIES
 from proxy_manager import ProxyManager
 from urllib.parse import urljoin
 import os
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -19,96 +26,78 @@ class Scraper:
         self.db = Database()
         self.base_url = BASE_URL
         self.category_base_url = CATEGORY_BASE_URL
-        self.session = None
-        self._init_session()
+        self.driver = None
+        self._init_driver()
 
-    def _init_session(self):
-        """セッションの初期化"""
+    def _init_driver(self):
+        """Seleniumドライバーの初期化"""
         try:
-            # プロキシのテスト
-            working_proxies = self.proxy_manager.get_working_proxies()
-            if not working_proxies:
-                raise Exception("動作するプロキシが見つかりません")
-
-            # 最適なプロキシを取得
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')  # ヘッドレスモード
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            
+            # プロキシの設定
             best_proxy = self.proxy_manager.get_best_proxy()
-            if not best_proxy:
-                raise Exception("最適なプロキシが見つかりません")
-
-            logging.info(f"最適なプロキシを使用: {best_proxy}")
+            if best_proxy:
+                chrome_options.add_argument(f'--proxy-server={best_proxy}')
+            
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            self.driver.set_page_load_timeout(90)
+            
+            logging.info("Seleniumドライバーの初期化が完了しました")
             
         except Exception as e:
-            logging.error(f"セッションの初期化に失敗: {str(e)}")
+            logging.error(f"Seleniumドライバーの初期化に失敗: {str(e)}")
             raise
 
     def make_request(self, url, unit=None, max_retries=5):
-        """Splashを使用してリクエストを送信"""
-        # SplashのURLを環境変数から取得
-        splash_url = os.getenv('SPLASH_URL', 'http://localhost:8050') + '/execute'
-        params = {
-            "wait": 0.5,
-            "images": 1,
-            "expand": 1,
-            "timeout": 90.0,
-            "url": url,
-            "proxy": self.proxy_manager.get_best_proxy() or None
-        }
-        
-        if unit:
-            params["lua_source"] = f"""
-            function main(splash, args)
-                splash.private_mode_enabled = false
-                splash.images_enabled = false
-                assert(splash:go(args.url))
-                splash:wait(2)
-
-                -- runjsで #unit_1 を直接クリック
-                splash:runjs("document.querySelector('#unit_{unit}').click();")
-                splash:wait(3)
-
-                -- 1枚表示の price list に切り替わったか確認（特定の onclick を含むか）
-                local max_tries = 5
-                for i = 1, max_tries do
-                    local html = splash:html()
-                    if html:find("change_volume%({unit},") then  -- 「(」は「%(」にエスケープ
-                    break
-                    end
-                    splash:wait(1)
-                end
-
-                return {{ html = splash:html() }}
-            end
-            """
-        
-        else:
-            params["lua_source"] = f"""
-            function main(splash, args)
-                splash.private_mode_enabled = false
-                splash.images_enabled = false
-                assert(splash:go(args.url))
-                splash:wait(2)
-
-                return {{ html = splash:html() }}
-            end
-            """
-
+        """Seleniumを使用してリクエストを送信"""
         for attempt in range(max_retries):
             try:
-                response = requests.get(splash_url, params=params, headers=HEADERS, timeout=90)
-                response.raise_for_status()
+                self.driver.get(url)
+                WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
                 
-                # レスポンスの内容をログ出力
-                logging.info(f"レスポンスのステータスコード: {response.status_code}")
-                logging.info(f"レスポンスの内容の長さ: {len(response.text)}")
+                if unit:
+                    # 単位切り替えボタンをクリック
+                    unit_button = WebDriverWait(self.driver, 10).until(
+                        EC.element_to_be_clickable((By.ID, f"unit_{unit}"))
+                    )
+                    unit_button.click()
+                    
+                    # 価格リストの更新を待機
+                    WebDriverWait(self.driver, 10).until(
+                        lambda driver: "change_volume(" in driver.page_source
+                    )
+                
+                # ページの読み込みを待機
+                time.sleep(2)
+                
+                # HTMLを取得
+                html = self.driver.page_source
+                
+                # レスポンスオブジェクトを作成
+                response = requests.Response()
+                response._content = html.encode('utf-8')
+                response.status_code = 200
                 
                 return response
+                
             except Exception as e:
-                if attempt == 0:  # 最初の試行でのみログを出力
+                if attempt == 0:
                     logging.warning(f"リクエスト失敗 (試行 {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt < max_retries - 1:
-                    time.sleep(random.uniform(2, 5))  # リトライ間隔を調整
+                    time.sleep(random.uniform(2, 5))
                 else:
                     raise
+
+    def __del__(self):
+        """デストラクタでドライバーを閉じる"""
+        if self.driver:
+            self.driver.quit()
 
     def _extract_size_from_url(self, url):
         """URLからサイズ情報を抽出"""
