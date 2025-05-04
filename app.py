@@ -66,11 +66,19 @@ def update_log_display():
     log_container.text_area("ログ", value=log_stream.getvalue(), height=300, key=f"log_display_{current_time}")
 
 # スクレイパーの初期化
-@st.cache_resource
+@st.cache_resource(ttl=3600)  # 1時間でキャッシュを無効化
 def init_scraper():
-    return Scraper()
+    scraper = Scraper()
+    return scraper
 
-scraper = init_scraper()
+# スクレイパーの取得（スレッドセーフな方法）
+def get_scraper():
+    if 'scraper' not in st.session_state:
+        st.session_state.scraper = init_scraper()
+    return st.session_state.scraper
+
+# スクレイパーの使用
+scraper = get_scraper()
 
 # データベースの初期化
 db = Database()

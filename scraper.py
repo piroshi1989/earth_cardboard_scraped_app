@@ -10,119 +10,179 @@ from config import SIZES, BASE_URL, CATEGORY_BASE_URL, HEADERS, QUANTITIES
 from proxy_manager import ProxyManager
 from urllib.parse import urljoin
 import os
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.common.exceptions import TimeoutException
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+import threading
+from contextlib import contextmanager
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class Scraper:
-    def __init__(self):
-        self.proxy_manager = ProxyManager()
-        self.db = Database()
-        self.base_url = BASE_URL
-        self.category_base_url = CATEGORY_BASE_URL
-        self.driver = None
-        self._init_driver()
+    _instance = None
+    _lock = threading.Lock()
+    _playwright = None
+    _browser = None
+    _context = None
+    _initialized = False
 
-    def _init_driver(self):
-        """Seleniumドライバーの初期化"""
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super(Scraper, cls).__new__(cls)
+            return cls._instance
+
+    def __init__(self):
+        if not self._initialized:
+            with self._lock:
+                if not self._initialized:
+                    self.proxy_manager = ProxyManager()
+                    self.db = Database()
+                    self.base_url = BASE_URL
+                    self.category_base_url = CATEGORY_BASE_URL
+                    self._initialized = True
+
+    @classmethod
+    def _ensure_playwright(cls):
+        with cls._lock:
+            if cls._playwright is None:
+                cls._playwright = sync_playwright().start()
+                logging.info("Playwrightの初期化が完了しました")
+
+    @classmethod
+    def _ensure_browser(cls, proxy_config=None):
+        with cls._lock:
+            if cls._browser is None:
+                cls._browser = cls._playwright.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-gpu',
+                        '--disable-software-rasterizer',
+                        '--disable-web-security',
+                        '--disable-features=VizDisplayCompositor',
+                        '--disable-features=IsolateOrigins,site-per-process'
+                    ]
+                )
+            if cls._context is None:
+                cls._context = cls._browser.new_context(
+                    viewport={'width': 1920, 'height': 1080},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    proxy=proxy_config
+                )
+
+    @contextmanager
+    def _get_page(self, proxy_config=None):
+        """ページインスタンスを取得するコンテキストマネージャ"""
+        self._ensure_playwright()
+        self._ensure_browser(proxy_config)
+        
+        page = None
         try:
-            chrome_options = Options()
-            chrome_options.add_argument('--headless=new')
-            chrome_options.add_argument('--no-sandbox')
-            chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--disable-gpu')
-            chrome_options.add_argument('--window-size=1920,1080')
-            chrome_options.add_argument('--disable-extensions')
-            chrome_options.add_argument('--disable-software-rasterizer')
-            chrome_options.add_argument('--disable-setuid-sandbox')
-            chrome_options.add_argument('--disable-web-security')
-            chrome_options.add_argument('--disable-features=VizDisplayCompositor')
-            chrome_options.add_argument('--disable-features=IsolateOrigins,site-per-process')
-            
-            # プロキシの設定（一時的に無効化）
-            # best_proxy = self.proxy_manager.get_best_proxy()
-            # if best_proxy:
-            #     chrome_options.add_argument(f'--proxy-server={best_proxy}')
-            
-            # ChromeDriverの設定
-            service = Service(executable_path='/usr/bin/chromedriver')
-            self.driver = webdriver.Chrome(service=service, options=chrome_options)
-            
-            # タイムアウト設定を延長
-            self.driver.set_page_load_timeout(60)
-            self.driver.set_script_timeout(60)
-            
-            # 初期化確認
-            self.driver.get('about:blank')
-            logging.info("Seleniumドライバーの初期化が完了しました")
-            
-        except Exception as e:
-            logging.error(f"Seleniumドライバーの初期化に失敗: {str(e)}")
-            if self.driver:
-                self.driver.quit()
-            raise
+            with self._lock:
+                page = self._context.new_page()
+                page.set_default_timeout(60000)
+                yield page
+        finally:
+            if page:
+                try:
+                    page.close()
+                except Exception as e:
+                    logging.error(f"ページのクローズに失敗: {str(e)}")
 
     def make_request(self, url, unit=None, max_retries=5):
-        """Seleniumを使用してリクエストを送信"""
+        """Playwrightを使用してリクエストを送信"""
         for attempt in range(max_retries):
             try:
-                # ページの読み込みを待機
-                self.driver.get(url)
-                WebDriverWait(self.driver, 30).until(
-                    EC.presence_of_element_located((By.TAG_NAME, "body"))
-                )
-                
-                if unit:
-                    try:
-                        # 単位切り替えボタンが存在するか確認
-                        unit_button = WebDriverWait(self.driver, 10).until(
-                            EC.presence_of_element_located((By.ID, f"unit_{unit}"))
-                        )
-                        
-                        # JavaScriptを使用してクリックを実行
-                        self.driver.execute_script("arguments[0].click();", unit_button)
-                        
-                        # 価格リストの更新を待機
-                        WebDriverWait(self.driver, 30).until(
-                            lambda driver: "change_volume(" in driver.page_source
-                        )
-                    except TimeoutException:
-                        logging.info(f"unit_{unit} ボタンが存在しないためスキップします")
-                        # スキップして次の処理へ
-                
-                # ページの読み込みを待機
-                time.sleep(3)
-                
-                # HTMLを取得
-                html = self.driver.page_source
-                
-                # レスポンスオブジェクトを作成
-                response = requests.Response()
-                response._content = html.encode('utf-8')
-                response.status_code = 200
-                response.encoding = 'utf-8'
-                
-                return response
+                # プロキシの取得
+                best_proxy = self.proxy_manager.get_best_proxy()
+                proxy_config = None
+                if best_proxy:
+                    # プロキシURLから認証情報を抽出
+                    proxy_parts = best_proxy.split('@')
+                    if len(proxy_parts) == 2:
+                        auth_part = proxy_parts[0].replace('http://', '')
+                        server_part = proxy_parts[1]
+                        username, password = auth_part.split(':')
+                        proxy_config = {
+                            "server": f"http://{server_part}",
+                            "username": username,
+                            "password": password
+                        }
+                    else:
+                        proxy_config = {
+                            "server": best_proxy
+                        }
+                    logging.info(f"プロキシを使用: {best_proxy}")
+
+                with self._get_page(proxy_config) as page:
+                    # ページの読み込みを待機
+                    page.goto(url, wait_until='networkidle')
+                    
+                    if unit:
+                        try:
+                            # 単位切り替えボタンが存在するか確認
+                            unit_button = page.wait_for_selector(f"#unit_{unit}", timeout=10000)
+                            if unit_button:
+                                # JavaScriptを使用してクリックを実行
+                                page.evaluate("(element) => element.click()", unit_button)
+                                
+                                # 価格リストの更新を待機
+                                page.wait_for_function(
+                                    "() => document.body.innerHTML.includes('change_volume(')",
+                                    timeout=30000
+                                )
+                        except PlaywrightTimeoutError:
+                            logging.info(f"unit_{unit} ボタンが存在しないためスキップします")
+                    
+                    # ページの読み込みを待機
+                    time.sleep(3)
+                    
+                    # HTMLを取得
+                    html = page.content()
+                    
+                    # レスポンスオブジェクトを作成
+                    response = requests.Response()
+                    response._content = html.encode('utf-8')
+                    response.status_code = 200
+                    response.encoding = 'utf-8'
+                    
+                    return response
                 
             except Exception as e:
                 if attempt == 0:
                     logging.warning(f"リクエスト失敗 (試行 {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt < max_retries - 1:
-                    time.sleep(random.uniform(5, 10))  # 再試行前の待機時間を延長
+                    time.sleep(random.uniform(5, 10))
                 else:
                     raise
 
+    @classmethod
+    def cleanup(cls):
+        """リソースのクリーンアップ"""
+        with cls._lock:
+            if cls._context:
+                try:
+                    cls._context.close()
+                except Exception as e:
+                    logging.error(f"コンテキストのクローズに失敗: {str(e)}")
+                cls._context = None
+            if cls._browser:
+                try:
+                    cls._browser.close()
+                except Exception as e:
+                    logging.error(f"ブラウザのクローズに失敗: {str(e)}")
+                cls._browser = None
+            if cls._playwright:
+                try:
+                    cls._playwright.stop()
+                except Exception as e:
+                    logging.error(f"Playwrightの停止に失敗: {str(e)}")
+                cls._playwright = None
+
     def __del__(self):
-        """デストラクタでドライバーを閉じる"""
-        if self.driver:
-            self.driver.quit()
+        """デストラクタでリソースをクリーンアップ"""
+        self.cleanup()
 
     def _extract_size_from_url(self, url):
         """URLからサイズ情報を抽出"""
@@ -384,116 +444,217 @@ class Scraper:
                 # 1枚単位の価格を取得
                 max_retries = 3  # 最大再試行回数
                 for attempt in range(max_retries):
-                    response = self.make_request(url, unit=1)
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    
-                    # タブが正しく切り替わっているか確認
-                    price_element = soup.find('li', id='small_price1')
-                    if price_element and 'onclick' in price_element.attrs:
-                        onclick_text = price_element['onclick']
-                        if 'change_volume(1,' in onclick_text:
-                            break
-                        else:
-                            logging.warning(f"1枚表示の価格要素が見つかりません。再試行 {attempt + 1}/{max_retries}")
-                    else:
-                        logging.warning(f"価格要素が見つかりません。再試行 {attempt + 1}/{max_retries}")
-                    if attempt < max_retries - 1:
-                        time.sleep(2)  # 再試行前に少し待機
-                    else:
-                        logging.error("1枚表示の価格要素を取得できませんでした。")
-                        continue
-                
-                # 商品データの取得
-                data = {
-                    '商品コード': product_id,  # データベースのカラム名に合わせて変更
-                    '商品名': self._get_text(soup, '商品名'),
-                    'サイズ': self.db.get_size_type(product_id),
-                    'url': url,
-                    '外形_三辺合計': self._get_numeric(soup, '3辺外寸合計'),
-                    '長さ_内寸': self._get_numeric(soup, '長さ (内寸)'),
-                    '幅_内寸': self._get_numeric(soup, '幅 (内寸)'),
-                    '深さ_内寸': self._get_numeric(soup, '深さ (内寸)'),
-                    '製法': self._get_text(soup, 'フルート'),
-                    '長さ_外寸': self._get_numeric(soup, '長さ (外寸)'),
-                    '幅_外寸': self._get_numeric(soup, '幅 (外寸)'),
-                    '深さ_外寸': self._get_numeric(soup, '深さ (外寸)'),
-                    '色': self._get_text(soup, '表面色'),
-                    '形式': self._get_text(soup, '箱形式'),
-                    '厚み': self._get_numeric(soup, '厚さ'),
-                    '材質': self._get_text(soup, '紙質（強度）'),
-                }
-                
-                # 1枚単位の価格情報を取得
-                price_list = soup.find('ul', id='small_price_list')
-                if price_list:
-                    MAX_ITERATIONS = 120
-                    i = 1
-                    while i <= MAX_ITERATIONS:
-                        price_element = soup.find('li', id=f'small_price{i}')
-                        if not price_element:
-                            break
+                    try:
+                        with self._get_page() as page:
+                            logging.info("新しいページを作成しました")
                             
-                        onclick_text = price_element.get('onclick', '')
-                        match = re.search(r'change_volume\((\d+),\s*(\d+),', onclick_text)
-                        if match:
-                            quantity = int(match.group(1))
-                            price = int(match.group(2))
-                            data[f'{quantity}枚の価格'] = price  # データベースのカラム名に合わせて変更
-                            logging.info(f"{quantity}枚の価格を取得: {price}円")
-                            i += 1
-                        else:
-                            break
-                
-                # 10枚単位の価格を取得
-                response = self.make_request(url, unit=10)
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                price_list = soup.find('ul', id='small_price_list')
-                if price_list:
-                    MAX_ITERATIONS = 120
-                    i = 1
-                    while i <= MAX_ITERATIONS:
-                        price_element = soup.find('li', id=f'small_price{i}')
-                        if not price_element:
-                            break
+                            # ページの読み込みを待機
+                            logging.info("ページの読み込みを開始")
+                            try:
+                                page.goto(url, wait_until='networkidle')
+                                time.sleep(5)  # ページの完全な読み込みを待機
+                                logging.info("ページの読み込みが完了しました")
+                            except Exception as e:
+                                logging.error(f"ページの読み込みに失敗: {str(e)}")
+                                raise
                             
-                        onclick_text = price_element.get('onclick', '')
-                        match = re.search(r'change_volume\((\d+),\s*(\d+),', onclick_text)
-                        if match:
-                            quantity = int(match.group(1))
-                            price = int(match.group(2))
-                            data[f'{quantity}枚の価格'] = price  # データベースのカラム名に合わせて変更
-                            logging.info(f"{quantity}枚の価格を取得: {price}円")
-                            i += 1
+                            # 1枚単位の価格を取得
+                            try:
+                                logging.info("1枚単位の価格取得を開始")
+                                unit_button = page.wait_for_selector("#unit_1", timeout=15000)
+                                if unit_button:
+                                    logging.info("unit_1 ボタンが見つかりました")
+                                    try:
+                                        page.evaluate("(element) => element.click()", unit_button)
+                                        logging.info("unit_1 ボタンをクリックしました")
+                                        
+                                        # 価格リストの更新を待機
+                                        logging.info("価格リストの更新を待機中")
+                                        page.wait_for_function(
+                                            "() => document.body.innerHTML.includes('change_volume(')",
+                                            timeout=45000
+                                        )
+                                        time.sleep(5)  # 価格リストの更新を待機
+                                        logging.info("価格リストの更新が完了しました")
+                                    except Exception as e:
+                                        logging.error(f"unit_1 ボタンのクリックに失敗: {str(e)}")
+                                        raise
+                            except PlaywrightTimeoutError:
+                                logging.info("unit_1 ボタンが存在しないためスキップします")
+                            
+                            # HTMLを取得
+                            logging.info("HTMLの取得を開始")
+                            try:
+                                html = page.content()
+                                soup = BeautifulSoup(html, 'html.parser')
+                                logging.info("HTMLの取得が完了しました")
+                            except Exception as e:
+                                logging.error(f"HTMLの取得に失敗: {str(e)}")
+                                raise
+                            
+                            # 商品データの取得
+                            logging.info("商品データの取得を開始")
+                            try:
+                                data = {
+                                    '商品コード': product_id,
+                                    '商品名': self._get_text(soup, '商品名'),
+                                    'サイズ': self.db.get_size_type(product_id),
+                                    'url': url,
+                                    '外形_三辺合計': self._get_numeric(soup, '3辺外寸合計'),
+                                    '長さ_内寸': self._get_numeric(soup, '長さ (内寸)'),
+                                    '幅_内寸': self._get_numeric(soup, '幅 (内寸)'),
+                                    '深さ_内寸': self._get_numeric(soup, '深さ (内寸)'),
+                                    '製法': self._get_text(soup, 'フルート'),
+                                    '長さ_外寸': self._get_numeric(soup, '長さ (外寸)'),
+                                    '幅_外寸': self._get_numeric(soup, '幅 (外寸)'),
+                                    '深さ_外寸': self._get_numeric(soup, '深さ (外寸)'),
+                                    '色': self._get_text(soup, '表面色'),
+                                    '形式': self._get_text(soup, '箱形式'),
+                                    '厚み': self._get_numeric(soup, '厚さ'),
+                                    '材質': self._get_text(soup, '紙質（強度）'),
+                                }
+                                logging.info("商品データの取得が完了しました")
+                            except Exception as e:
+                                logging.error(f"商品データの取得に失敗: {str(e)}")
+                                raise
+                            
+                            # 1枚単位の価格情報を取得
+                            logging.info("1枚単位の価格情報の取得を開始")
+                            try:
+                                price_list = soup.find('ul', id='small_price_list')
+                                if price_list:
+                                    logging.info("価格リストが見つかりました")
+                                    MAX_ITERATIONS = 120
+                                    i = 1
+                                    while i <= MAX_ITERATIONS:
+                                        price_element = soup.find('li', id=f'small_price{i}')
+                                        if not price_element:
+                                            logging.info(f"価格要素 {i} が見つかりませんでした")
+                                            break
+                                            
+                                        onclick_text = price_element.get('onclick', '')
+                                        match = re.search(r'change_volume\((\d+),\s*(\d+),', onclick_text)
+                                        if match:
+                                            quantity = int(match.group(1))
+                                            price = int(match.group(2))
+                                            data[f'{quantity}枚の価格'] = price
+                                            logging.info(f"{quantity}枚の価格を取得: {price}円")
+                                            i += 1
+                                        else:
+                                            logging.info(f"価格要素 {i} のパターンマッチに失敗しました")
+                                            break
+                                else:
+                                    logging.warning("価格リストが見つかりませんでした")
+                            except Exception as e:
+                                logging.error(f"1枚単位の価格情報の取得に失敗: {str(e)}")
+                                raise
+                            
+                            # 10枚単位の価格を取得
+                            try:
+                                logging.info("10枚単位の価格取得を開始")
+                                unit_button = page.wait_for_selector("#unit_10", timeout=15000)
+                                if unit_button:
+                                    logging.info("unit_10 ボタンが見つかりました")
+                                    try:
+                                        page.evaluate("(element) => element.click()", unit_button)
+                                        logging.info("unit_10 ボタンをクリックしました")
+                                        
+                                        # 価格リストの更新を待機
+                                        logging.info("価格リストの更新を待機中")
+                                        page.wait_for_function(
+                                            "() => document.body.innerHTML.includes('change_volume(')",
+                                            timeout=45000
+                                        )
+                                        time.sleep(5)  # 価格リストの更新を待機
+                                        logging.info("価格リストの更新が完了しました")
+                                        
+                                        # HTMLを再取得
+                                        logging.info("HTMLの再取得を開始")
+                                        html = page.content()
+                                        soup = BeautifulSoup(html, 'html.parser')
+                                        logging.info("HTMLの再取得が完了しました")
+                                    except Exception as e:
+                                        logging.error(f"unit_10 ボタンのクリックに失敗: {str(e)}")
+                                        raise
+                                else:
+                                    logging.info("unit_10 ボタンが存在しないためスキップします")
+                                
+                                # 10枚単位の価格情報を取得
+                                logging.info("10枚単位の価格情報の取得を開始")
+                                price_list = soup.find('ul', id='small_price_list')
+                                if price_list:
+                                    logging.info("価格リストが見つかりました")
+                                    MAX_ITERATIONS = 120
+                                    i = 1
+                                    while i <= MAX_ITERATIONS:
+                                        price_element = soup.find('li', id=f'small_price{i}')
+                                        if not price_element:
+                                            logging.info(f"価格要素 {i} が見つかりませんでした")
+                                            break
+                                            
+                                        onclick_text = price_element.get('onclick', '')
+                                        match = re.search(r'change_volume\((\d+),\s*(\d+),', onclick_text)
+                                        if match:
+                                            quantity = int(match.group(1))
+                                            price = int(match.group(2))
+                                            data[f'{quantity}枚の価格'] = price
+                                            logging.info(f"{quantity}枚の価格を取得: {price}円")
+                                            i += 1
+                                        else:
+                                            logging.info(f"価格要素 {i} のパターンマッチに失敗しました")
+                                            break
+                                else:
+                                    logging.warning("価格リストが見つかりませんでした")
+                                
+                                # まとめ買いの価格を取得
+                                logging.info("まとめ買いの価格取得を開始")
+                                big_price_list = soup.find('ul', id='big_price_list')
+                                if big_price_list:
+                                    logging.info("価格リストが見つかりました")
+                                    MAX_ITERATIONS = 120
+                                    i = 1
+                                    while i <= MAX_ITERATIONS:
+                                        big_price_element = big_price_list.find('li', id=f'big_price{i}')
+                                        if not big_price_element:
+                                            logging.info(f"価格要素 {i} が見つかりませんでした")
+                                            break
+                                            
+                                        onclick_text = big_price_element.get('onclick', '')
+                                        match = re.search(r'change_volume\((\d+),\s*(\d+),', onclick_text)
+                                        if match:
+                                            quantity = int(match.group(1))
+                                            price = int(match.group(2))
+                                            data[f'{quantity}枚の価格'] = price
+                                            logging.info(f"{quantity}枚の価格を取得: {price}円")
+                                            i += 1
+                                        else:
+                                            logging.info(f"価格要素 {i} のパターンマッチに失敗しました")
+                                            break
+                                else:
+                                    logging.warning("価格リストが見つかりませんでした")
+                            except Exception as e:
+                                logging.error(f"10枚単位の価格取得中にエラー: {str(e)}")
+                                raise
+                            
+                            # データベースに保存
+                            logging.info("データベースへの保存を開始")
+                            try:
+                                self.db.save_product(data)
+                                logging.info(f"商品データの取得完了: {product_id}")
+                                
+                                # 取得したデータをリストに追加
+                                all_data.append(data)
+                                logging.info("商品データをリストに追加しました")
+                                break
+                            except Exception as e:
+                                logging.error(f"データベースへの保存に失敗: {str(e)}")
+                                raise
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            logging.warning(f"リクエスト失敗 (試行 {attempt + 1}/{max_retries}): {str(e)}")
+                            time.sleep(random.uniform(10, 15))  # 再試行前の待機時間を延長
                         else:
-                            break
-                
-                # big_priceの価格を取得
-                big_price_list = soup.find('ul', id='big_price_list')
-                if big_price_list:
-                    MAX_ITERATIONS = 120
-                    i = 1
-                    while i <= MAX_ITERATIONS:
-                        big_price_element = soup.find('li', id=f'big_price{i}')
-                        if not big_price_element:
-                            break
-                        onclick_text = big_price_element.get('onclick', '')
-                        match = re.search(r'change_volume\((\d+),\s*(\d+),', onclick_text)
-                        if match:
-                            quantity = int(match.group(1))
-                            price = int(match.group(2))
-                            data[f'{quantity}枚の価格'] = price  # データベースのカラム名に合わせて変更
-                            logging.info(f"{quantity}枚の価格を取得: {price}円")
-                            i += 1
-                        else:
-                            break
-                
-                # データベースに保存
-                self.db.save_product(data)
-                logging.info(f"商品データの取得完了: {product_id}")
-                
-                # 取得したデータをリストに追加
-                all_data.append(data)
+                            raise
                 
             except Exception as e:
                 logging.error(f"商品 {product_id} の詳細取得中にエラー: {str(e)}")
