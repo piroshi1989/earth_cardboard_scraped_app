@@ -98,78 +98,123 @@ class Scraper:
                 # プロキシの取得
                 best_proxy = self.proxy_manager.get_best_proxy()
                 proxy_config = None
+                
                 if best_proxy:
-                    # プロキシURLから認証情報を抽出
-                    proxy_parts = best_proxy.split('@')
-                    if len(proxy_parts) == 2:
-                        auth_part = proxy_parts[0].replace('http://', '')
-                        server_part = proxy_parts[1]
-                        username, password = auth_part.split(':')
-                        proxy_config = {
-                            "server": f"http://{server_part}",
-                            "username": username,
-                            "password": password
-                        }
-                    else:
-                        proxy_config = {
-                            "server": best_proxy
-                        }
-                    logging.info(f"プロキシを使用: {best_proxy}")
+                    try:
+                        # プロキシURLから認証情報を抽出
+                        proxy_parts = best_proxy.split('@')
+                        if len(proxy_parts) == 2:
+                            auth_part = proxy_parts[0].replace('http://', '')
+                            server_part = proxy_parts[1]
+                            try:
+                                username, password = auth_part.split(':')
+                                proxy_config = {
+                                    "server": f"http://{server_part}",
+                                    "username": username,
+                                    "password": password,
+                                    "bypass": "*.google.com,*.googleapis.com,*.gstatic.com"
+                                }
+                            except ValueError:
+                                logging.warning(f"プロキシの認証情報の形式が不正です: {best_proxy}")
+                                continue
+                        else:
+                            proxy_config = {
+                                "server": best_proxy,
+                                "bypass": "*.google.com,*.googleapis.com,*.gstatic.com"
+                            }
+                        logging.info(f"プロキシを使用: {best_proxy}")
+                    except Exception as e:
+                        logging.error(f"プロキシの設定中にエラーが発生: {str(e)}")
+                        continue
 
                 with self._get_page(proxy_config) as page:
-                    # ページの読み込みを待機
-                    page.goto(url, wait_until='networkidle')
-                    
-                    if unit:
-                        try:
-                            # 単位切り替えボタンが存在するか確認
-                            unit_button = page.wait_for_selector(f"#unit_{unit}", timeout=10000)
-                            if unit_button:
-                                # JavaScriptを使用してクリックを実行
-                                page.evaluate("(element) => element.click()", unit_button)
-                                
-                                # 価格リストの更新を待機
-                                page.wait_for_function(
-                                    "() => document.body.innerHTML.includes('change_volume(')",
-                                    timeout=30000
-                                )
-                        except PlaywrightTimeoutError:
-                            logging.info(f"unit_{unit} ボタンが存在しないためスキップします")
-                    
-                    # ページの読み込みを待機
-                    time.sleep(3)
-                    
-                    # HTMLを取得
-                    html = page.content()
-                    
-                    # レスポンスオブジェクトを作成
-                    response = requests.Response()
-                    response._content = html.encode('utf-8')
-                    response.status_code = 200
-                    response.encoding = 'utf-8'
-                    
-                    return response
+                    try:
+                        # プロキシの接続テスト
+                        if proxy_config:
+                            try:
+                                page.goto("http://www.google.com", timeout=10000)
+                                logging.info("プロキシの接続テストに成功しました")
+                            except Exception as e:
+                                logging.error(f"プロキシの接続テストに失敗: {str(e)}")
+                                raise
+
+                        # ページの読み込みを待機
+                        page.goto(url, wait_until='networkidle', timeout=30000)
+                        
+                        if unit:
+                            try:
+                                # 単位切り替えボタンが存在するか確認
+                                unit_button = page.wait_for_selector(f"#unit_{unit}", timeout=30000)
+                                if unit_button:
+                                    # JavaScriptを使用してクリックを実行
+                                    page.evaluate("(element) => element.click()", unit_button)
+                                    
+                                    # 価格リストの更新を待機
+                                    page.wait_for_function(
+                                        "() => document.body.innerHTML.includes('change_volume(')",
+                                        timeout=45000
+                                    )
+                            except PlaywrightTimeoutError:
+                                logging.info(f"unit_{unit} ボタンが存在しないためスキップします")
+                        
+                        # ページの読み込みを待機
+                        time.sleep(3)
+                        
+                        # HTMLを取得
+                        html = page.content()
+                        
+                        # レスポンスオブジェクトを作成
+                        response = requests.Response()
+                        response._content = html.encode('utf-8')
+                        response.status_code = 200
+                        response.encoding = 'utf-8'
+                        
+                        return response
+                    except Exception as e:
+                        logging.error(f"ページの操作中にエラーが発生: {str(e)}")
+                        raise
+                    finally:
+                        self.cleanup()
                 
             except Exception as e:
                 if attempt == 0:
                     logging.warning(f"リクエスト失敗 (試行 {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt < max_retries - 1:
-                    time.sleep(random.uniform(5, 10))
+                    time.sleep(random.uniform(10, 15))  # 再試行前の待機時間を延長
                 else:
                     raise
+            finally:
+                self.cleanup()
 
     def cleanup(self):
         """リソースのクリーンアップ"""
         try:
             if hasattr(self._thread_local, 'context'):
-                self._thread_local.context.close()
-                delattr(self._thread_local, 'context')
+                try:
+                    self._thread_local.context.close()
+                except Exception as e:
+                    logging.error(f"コンテキストのクローズに失敗: {str(e)}")
+                finally:
+                    delattr(self._thread_local, 'context')
+                    logging.info("コンテキストをクリーンアップしました")
+
             if hasattr(self._thread_local, 'browser'):
-                self._thread_local.browser.close()
-                delattr(self._thread_local, 'browser')
+                try:
+                    self._thread_local.browser.close()
+                except Exception as e:
+                    logging.error(f"ブラウザのクローズに失敗: {str(e)}")
+                finally:
+                    delattr(self._thread_local, 'browser')
+                    logging.info("ブラウザをクリーンアップしました")
+
             if hasattr(self._thread_local, 'playwright'):
-                self._thread_local.playwright.stop()
-                delattr(self._thread_local, 'playwright')
+                try:
+                    self._thread_local.playwright.stop()
+                except Exception as e:
+                    logging.error(f"Playwrightの停止に失敗: {str(e)}")
+                finally:
+                    delattr(self._thread_local, 'playwright')
+                    logging.info("Playwrightをクリーンアップしました")
         except Exception as e:
             logging.error(f"リソースのクリーンアップ中にエラー: {str(e)}")
 
@@ -651,10 +696,14 @@ class Scraper:
                             time.sleep(random.uniform(10, 15))  # 再試行前の待機時間を延長
                         else:
                             raise
+                    finally:
+                        self.cleanup()
                 
             except Exception as e:
                 logging.error(f"商品 {product_id} の詳細取得中にエラー: {str(e)}")
                 continue
+            finally:
+                self.cleanup()
         
         return all_data  # 取得した全商品のデータを返す
 
