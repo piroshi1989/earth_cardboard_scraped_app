@@ -23,6 +23,7 @@ class Scraper:
     _browser = None
     _context = None
     _initialized = False
+    _page_lock = threading.Lock()
 
     def __new__(cls):
         with cls._lock:
@@ -79,14 +80,15 @@ class Scraper:
         
         page = None
         try:
-            with self._lock:
+            with self._page_lock:  # ページ作成をスレッドセーフに
                 page = self._context.new_page()
                 page.set_default_timeout(60000)
                 yield page
         finally:
             if page:
                 try:
-                    page.close()
+                    with self._page_lock:  # ページクローズをスレッドセーフに
+                        page.close()
                 except Exception as e:
                     logging.error(f"ページのクローズに失敗: {str(e)}")
 
