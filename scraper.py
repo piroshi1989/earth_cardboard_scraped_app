@@ -41,6 +41,10 @@ class Scraper:
             chrome_options.add_argument('--window-size=1920,1080')
             chrome_options.add_argument('--disable-extensions')
             chrome_options.add_argument('--disable-software-rasterizer')
+            chrome_options.add_argument('--disable-setuid-sandbox')
+            chrome_options.add_argument('--disable-web-security')
+            chrome_options.add_argument('--disable-features=VizDisplayCompositor')
+            chrome_options.add_argument('--disable-features=IsolateOrigins,site-per-process')
             
             # プロキシの設定（一時的に無効化）
             # best_proxy = self.proxy_manager.get_best_proxy()
@@ -51,9 +55,9 @@ class Scraper:
             service = Service(executable_path='/usr/bin/chromedriver')
             self.driver = webdriver.Chrome(service=service, options=chrome_options)
             
-            # タイムアウト設定を調整
-            self.driver.set_page_load_timeout(30)
-            self.driver.set_script_timeout(30)
+            # タイムアウト設定を延長
+            self.driver.set_page_load_timeout(60)
+            self.driver.set_script_timeout(60)
             
             # 初期化確認
             self.driver.get('about:blank')
@@ -69,21 +73,24 @@ class Scraper:
         """Seleniumを使用してリクエストを送信"""
         for attempt in range(max_retries):
             try:
+                # ページの読み込みを待機
                 self.driver.get(url)
-                WebDriverWait(self.driver, 10).until(
+                WebDriverWait(self.driver, 30).until(
                     EC.presence_of_element_located((By.TAG_NAME, "body"))
                 )
                 
                 if unit:
                     try:
                         # 単位切り替えボタンが存在するか確認
-                        unit_button = WebDriverWait(self.driver, 5).until(
-                            EC.element_to_be_clickable((By.ID, f"unit_{unit}"))
+                        unit_button = WebDriverWait(self.driver, 10).until(
+                            EC.presence_of_element_located((By.ID, f"unit_{unit}"))
                         )
-                        unit_button.click()
+                        
+                        # JavaScriptを使用してクリックを実行
+                        self.driver.execute_script("arguments[0].click();", unit_button)
                         
                         # 価格リストの更新を待機
-                        WebDriverWait(self.driver, 10).until(
+                        WebDriverWait(self.driver, 30).until(
                             lambda driver: "change_volume(" in driver.page_source
                         )
                     except TimeoutException:
@@ -91,7 +98,7 @@ class Scraper:
                         # スキップして次の処理へ
                 
                 # ページの読み込みを待機
-                time.sleep(2)
+                time.sleep(3)
                 
                 # HTMLを取得
                 html = self.driver.page_source
@@ -108,7 +115,7 @@ class Scraper:
                 if attempt == 0:
                     logging.warning(f"リクエスト失敗 (試行 {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt < max_retries - 1:
-                    time.sleep(random.uniform(2, 5))
+                    time.sleep(random.uniform(5, 10))  # 再試行前の待機時間を延長
                 else:
                     raise
 
