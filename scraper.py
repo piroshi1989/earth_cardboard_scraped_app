@@ -19,11 +19,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 class Scraper:
     _instance = None
     _lock = threading.Lock()
-    _playwright = None
-    _browser = None
-    _context = None
     _initialized = False
-    _page_lock = threading.Lock()
+    _thread_local = threading.local()
 
     def __new__(cls):
         with cls._lock:
@@ -41,54 +38,56 @@ class Scraper:
                     self.category_base_url = CATEGORY_BASE_URL
                     self._initialized = True
 
-    @classmethod
-    def _ensure_playwright(cls):
-        with cls._lock:
-            if cls._playwright is None:
-                cls._playwright = sync_playwright().start()
-                logging.info("Playwrightの初期化が完了しました")
+    def _get_thread_local_playwright(self):
+        """スレッドローカルのPlaywrightインスタンスを取得または作成"""
+        if not hasattr(self._thread_local, 'playwright'):
+            self._thread_local.playwright = sync_playwright().start()
+            logging.info("Playwrightの初期化が完了しました")
+        return self._thread_local.playwright
 
-    @classmethod
-    def _ensure_browser(cls, proxy_config=None):
-        with cls._lock:
-            if cls._browser is None:
-                cls._browser = cls._playwright.chromium.launch(
-                    headless=True,
-                    args=[
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
-                        '--disable-dev-shm-usage',
-                        '--disable-gpu',
-                        '--disable-software-rasterizer',
-                        '--disable-web-security',
-                        '--disable-features=VizDisplayCompositor',
-                        '--disable-features=IsolateOrigins,site-per-process'
-                    ]
-                )
-            if cls._context is None:
-                cls._context = cls._browser.new_context(
-                    viewport={'width': 1920, 'height': 1080},
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                    proxy=proxy_config
-                )
+    def _get_thread_local_browser(self, proxy_config=None):
+        """スレッドローカルのブラウザインスタンスを取得または作成"""
+        if not hasattr(self._thread_local, 'browser'):
+            playwright = self._get_thread_local_playwright()
+            self._thread_local.browser = playwright.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-software-rasterizer',
+                    '--disable-web-security',
+                    '--disable-features=VizDisplayCompositor',
+                    '--disable-features=IsolateOrigins,site-per-process'
+                ]
+            )
+        return self._thread_local.browser
+
+    def _get_thread_local_context(self, proxy_config=None):
+        """スレッドローカルのコンテキストインスタンスを取得または作成"""
+        if not hasattr(self._thread_local, 'context'):
+            browser = self._get_thread_local_browser(proxy_config)
+            self._thread_local.context = browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                proxy=proxy_config
+            )
+        return self._thread_local.context
 
     @contextmanager
     def _get_page(self, proxy_config=None):
         """ページインスタンスを取得するコンテキストマネージャ"""
-        self._ensure_playwright()
-        self._ensure_browser(proxy_config)
-        
         page = None
         try:
-            with self._page_lock:  # ページ作成をスレッドセーフに
-                page = self._context.new_page()
-                page.set_default_timeout(60000)
-                yield page
+            context = self._get_thread_local_context(proxy_config)
+            page = context.new_page()
+            page.set_default_timeout(60000)
+            yield page
         finally:
             if page:
                 try:
-                    with self._page_lock:  # ページクローズをスレッドセーフに
-                        page.close()
+                    page.close()
                 except Exception as e:
                     logging.error(f"ページのクローズに失敗: {str(e)}")
 
@@ -159,28 +158,20 @@ class Scraper:
                 else:
                     raise
 
-    @classmethod
-    def cleanup(cls):
+    def cleanup(self):
         """リソースのクリーンアップ"""
-        with cls._lock:
-            if cls._context:
-                try:
-                    cls._context.close()
-                except Exception as e:
-                    logging.error(f"コンテキストのクローズに失敗: {str(e)}")
-                cls._context = None
-            if cls._browser:
-                try:
-                    cls._browser.close()
-                except Exception as e:
-                    logging.error(f"ブラウザのクローズに失敗: {str(e)}")
-                cls._browser = None
-            if cls._playwright:
-                try:
-                    cls._playwright.stop()
-                except Exception as e:
-                    logging.error(f"Playwrightの停止に失敗: {str(e)}")
-                cls._playwright = None
+        try:
+            if hasattr(self._thread_local, 'context'):
+                self._thread_local.context.close()
+                delattr(self._thread_local, 'context')
+            if hasattr(self._thread_local, 'browser'):
+                self._thread_local.browser.close()
+                delattr(self._thread_local, 'browser')
+            if hasattr(self._thread_local, 'playwright'):
+                self._thread_local.playwright.stop()
+                delattr(self._thread_local, 'playwright')
+        except Exception as e:
+            logging.error(f"リソースのクリーンアップ中にエラー: {str(e)}")
 
     def __del__(self):
         """デストラクタでリソースをクリーンアップ"""
@@ -458,6 +449,9 @@ class Scraper:
                                 logging.info("ページの読み込みが完了しました")
                             except Exception as e:
                                 logging.error(f"ページの読み込みに失敗: {str(e)}")
+                                if attempt < max_retries - 1:
+                                    time.sleep(5)  # 再試行前に待機
+                                    continue
                                 raise
                             
                             # 1枚単位の価格を取得
