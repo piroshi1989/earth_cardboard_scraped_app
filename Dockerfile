@@ -29,6 +29,22 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
+# 必要なパッケージをインストール
+RUN pip install \
+    streamlit \
+    pandas \
+    numpy \
+    requests \
+    beautifulsoup4 \
+    selenium \
+    selenium-wire \
+    webdriver_manager \
+    python-dotenv \
+    mysql-connector-python \
+    urllib3 \
+    blinker \ 
+    mitmproxy
+
 # アプリケーションのコピー
 COPY . .
 
@@ -42,4 +58,4 @@ EXPOSE 8501
 HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
 
 # エントリポイントを設定
-ENTRYPOINT ["sh", "-c", "streamlit run app.py --server.port ${PORT:-8501} --server.address 0.0.0.0"]
+ENTRYPOINT ["sh", "-c", "streamlit run app.py --server.port ${PORT:-8504} --server.address 0.0.0.0"]

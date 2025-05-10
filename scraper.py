@@ -10,7 +10,7 @@ from config import SIZES, BASE_URL, CATEGORY_BASE_URL, HEADERS, QUANTITIES
 from proxy_manager import ProxyManager
 from urllib.parse import urljoin
 import os
-from selenium import webdriver
+from seleniumwire import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -18,6 +18,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.common.exceptions import TimeoutException
+import tempfile
+import zipfile
+import gc  # ガベージコレクション用に追加
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -33,6 +36,23 @@ class Scraper:
     def _init_driver(self):
         """Seleniumドライバーの初期化"""
         try:
+            # プロキシの設定
+            best_proxy = self.proxy_manager.get_best_proxy()
+            if best_proxy:
+                logging.info(f"取得したプロキシ: {best_proxy}")
+                proxy_url = f"http://{best_proxy['username']}:{best_proxy['password']}@{best_proxy['host']}:{best_proxy['port']}"
+                
+                # Selenium-Wire オプションを設定
+                seleniumwire_options = {
+                    "proxy": {
+                        "http": proxy_url,
+                        "https": proxy_url
+                    },
+                }
+            else:
+                seleniumwire_options = {}
+
+            # Chrome オプションを設定
             chrome_options = Options()
             chrome_options.add_argument('--headless=new')
             chrome_options.add_argument('--no-sandbox')
@@ -46,14 +66,15 @@ class Scraper:
             chrome_options.add_argument('--disable-features=VizDisplayCompositor')
             chrome_options.add_argument('--disable-features=IsolateOrigins,site-per-process')
             
-            # プロキシの設定（一時的に無効化）
-            # best_proxy = self.proxy_manager.get_best_proxy()
-            # if best_proxy:
-            #     chrome_options.add_argument(f'--proxy-server={best_proxy}')
-            
             # ChromeDriverの設定
             service = Service(executable_path='/usr/bin/chromedriver')
-            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            
+            # Selenium-Wireを使用してドライバーを初期化
+            self.driver = webdriver.Chrome(
+                service=service,
+                seleniumwire_options=seleniumwire_options,
+                options=chrome_options
+            )
             
             # タイムアウト設定を延長
             self.driver.set_page_load_timeout(60)
@@ -85,6 +106,15 @@ class Scraper:
                         unit_button = WebDriverWait(self.driver, 10).until(
                             EC.presence_of_element_located((By.ID, f"unit_{unit}"))
                         )
+                        
+                        # ボタンがクリック可能になるまで待機
+                        WebDriverWait(self.driver, 10).until(
+                            EC.element_to_be_clickable((By.ID, f"unit_{unit}"))
+                        )
+                        
+                        # ボタンが表示されるまでスクロール
+                        self.driver.execute_script("arguments[0].scrollIntoView(true);", unit_button)
+                        time.sleep(1)  # スクロール後の待機
                         
                         # JavaScriptを使用してクリックを実行
                         self.driver.execute_script("arguments[0].click();", unit_button)
@@ -369,7 +399,6 @@ class Scraper:
             product_ids = self.db.get_all_product_ids()
         
         logging.info(f"取得対象の商品数: {len(product_ids)}")
-        all_data = []  # 全商品のデータを格納するリスト
         
         for product_id in product_ids:
             try:
@@ -405,7 +434,7 @@ class Scraper:
                 
                 # 商品データの取得
                 data = {
-                    '商品コード': product_id,  # データベースのカラム名に合わせて変更
+                    '商品コード': product_id,
                     '商品名': self._get_text(soup, '商品名'),
                     'サイズ': self.db.get_size_type(product_id),
                     'url': url,
@@ -438,11 +467,19 @@ class Scraper:
                         if match:
                             quantity = int(match.group(1))
                             price = int(match.group(2))
-                            data[f'{quantity}枚の価格'] = price  # データベースのカラム名に合わせて変更
+                            # キー名をデータベースのカラム名に合わせる
+                            data[f'price_{quantity}'] = price
                             logging.info(f"{quantity}枚の価格を取得: {price}円")
                             i += 1
                         else:
                             break
+                
+                # 不要な変数を削除
+                del price_list
+                del price_element
+                del soup
+                del response
+                gc.collect()  # ガベージコレクションを実行
                 
                 # 10枚単位の価格を取得
                 response = self.make_request(url, unit=10)
@@ -462,13 +499,24 @@ class Scraper:
                         if match:
                             quantity = int(match.group(1))
                             price = int(match.group(2))
-                            data[f'{quantity}枚の価格'] = price  # データベースのカラム名に合わせて変更
+                            # キー名をデータベースのカラム名に合わせる
+                            data[f'price_{quantity}'] = price
                             logging.info(f"{quantity}枚の価格を取得: {price}円")
                             i += 1
                         else:
                             break
                 
+                # 不要な変数を削除
+                del price_list
+                del price_element
+                del soup
+                del response
+                gc.collect()  # ガベージコレクションを実行
+                
                 # big_priceの価格を取得
+                response = self.make_request(url, unit=10)  # 10枚単位で再取得
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
                 big_price_list = soup.find('ul', id='big_price_list')
                 if big_price_list:
                     MAX_ITERATIONS = 120
@@ -482,7 +530,8 @@ class Scraper:
                         if match:
                             quantity = int(match.group(1))
                             price = int(match.group(2))
-                            data[f'{quantity}枚の価格'] = price  # データベースのカラム名に合わせて変更
+                            # キー名をデータベースのカラム名に合わせる
+                            data[f'price_{quantity}'] = price
                             logging.info(f"{quantity}枚の価格を取得: {price}円")
                             i += 1
                         else:
@@ -492,14 +541,17 @@ class Scraper:
                 self.db.save_product(data)
                 logging.info(f"商品データの取得完了: {product_id}")
                 
-                # 取得したデータをリストに追加
-                all_data.append(data)
+                # 最後の不要な変数を削除
+                del big_price_list
+                del big_price_element
+                del soup
+                del response
+                del data
+                gc.collect()  # ガベージコレクションを実行
                 
             except Exception as e:
                 logging.error(f"商品 {product_id} の詳細取得中にエラー: {str(e)}")
                 continue
-        
-        return all_data  # 取得した全商品のデータを返す
 
 def main():
     """メイン処理"""

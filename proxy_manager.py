@@ -3,6 +3,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from config import PROXY_CONFIGS
+import random
 
 class ProxyManager:
     def __init__(self):
@@ -116,48 +117,21 @@ class ProxyManager:
         return self.proxy_stats
 
     def get_best_proxy(self):
-        """最も信頼性の高いプロキシを取得"""
-        if not self.proxy_stats:
+        """最適なプロキシを取得"""
+        if not PROXY_CONFIGS:
             return None
+            
+        # ランダムにプロキシを選択
+        proxy_config = random.choice(PROXY_CONFIGS)
+        
+        # プロキシの形式を文字列から辞書に変更
+        return {
+            'host': proxy_config['host'],
+            'port': proxy_config['port'],
+            'username': proxy_config['username'],
+            'password': proxy_config['password']
+        }
 
-        best_proxy = max(
-            self.proxy_stats.items(),
-            key=lambda x: (
-                x[1]['success_count'],
-                -x[1]['failure_count'],
-                -x[1]['total_response_time'] / max(x[1]['success_count'], 1)
-            )
-        )[0]
-        return best_proxy
-
-    def make_request_with_proxy(self, url, max_retries=None):
-        """プロキシを使用してリクエストを送信"""
-        if max_retries is None:
-            max_retries = self.max_retries
-
-        for attempt in range(max_retries):
-            proxy = self.get_next_proxy()
-            if not proxy:
-                logging.error("利用可能なプロキシがありません")
-                return None
-
-            try:
-                proxies = {
-                    'http': proxy,
-                    'https': proxy
-                }
-                response = requests.get(url, proxies=proxies, timeout=self.timeout)
-                response.raise_for_status()
-                self._update_proxy_stats(proxy, success=True)
-                return response
-            except Exception as e:
-                self._update_proxy_stats(proxy, success=False)
-                logging.warning(f"リクエスト失敗 (試行 {attempt + 1}/{max_retries}): {str(e)}")
-                if attempt < max_retries - 1:
-                    time.sleep(1)  # リトライ前の待機
-
-        logging.error(f"最大リトライ回数を超えました: {url}")
-        return None
 
 def main():
     """メイン処理"""

@@ -114,8 +114,37 @@ class Database:
             conn.commit()
             logging.info("テーブルの作成が完了しました")
             
+            # 既存のテーブルに価格カラムを追加
+            self.add_price_columns()
+            
         except sqlite3.Error as e:
             logging.error(f"テーブル作成中にエラーが発生: {str(e)}")
+            raise
+        finally:
+            cursor.close()
+
+    def add_price_columns(self):
+        """価格カラムを追加"""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # 既存のカラムを取得
+            cursor.execute("PRAGMA table_info(products)")
+            existing_columns = [column[1] for column in cursor.fetchall()]
+            
+            # 新しい価格カラムを追加
+            for q in QUANTITIES:
+                column_name = f'price_{q}'
+                if column_name not in existing_columns:
+                    cursor.execute(f"ALTER TABLE products ADD COLUMN {column_name} INTEGER")
+                    logging.info(f"カラム {column_name} を追加しました")
+            
+            conn.commit()
+            logging.info("価格カラムの追加が完了しました")
+            
+        except sqlite3.Error as e:
+            logging.error(f"カラム追加中にエラーが発生: {str(e)}")
             raise
         finally:
             cursor.close()
@@ -125,6 +154,17 @@ class Database:
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
+            
+            # 既存のカラムを取得
+            cursor.execute("PRAGMA table_info(products)")
+            existing_columns = [column[1] for column in cursor.fetchall()]
+            
+            # 必要なカラムを確認して追加
+            for q in QUANTITIES:
+                column_name = f'price_{q}'
+                if column_name not in existing_columns:
+                    cursor.execute(f"ALTER TABLE products ADD COLUMN {column_name} INTEGER")
+                    logging.info(f"カラム {column_name} を追加しました")
             
             # 既存の商品をチェック
             cursor.execute('SELECT * FROM products WHERE product_id = ?', (product_data['商品コード'],))
@@ -155,9 +195,8 @@ class Database:
             # 価格データの処理
             price_data = {}
             for key, value in product_data.items():
-                if '枚の価格' in key:
-                    quantity = int(key.replace('枚の価格', ''))
-                    price_data[f'price_{quantity}'] = value
+                if key.startswith('price_'):
+                    price_data[key] = value
             
             if existing:
                 # 価格データの変更をチェック
@@ -396,12 +435,29 @@ class Database:
             cursor = conn.cursor()
             if size is not None:
                 cursor.execute(
-                    "SELECT product_id, name, size, created_at FROM products WHERE size = ? ORDER BY created_at DESC",
-                    (str(size),)
+                    """
+                    SELECT product_id, name, size, outer_dimension_sum, inner_length, 
+                           inner_width, inner_depth, outer_length, outer_width, outer_depth,
+                           manufacturing_method, processing_location, color, box_type, 
+                           thickness, material, standard_width, created_at, updated_at
+                    FROM products 
+                    WHERE size LIKE ? 
+                    ORDER BY created_at DESC
+                    """,
+                    (f"%{str(size)}%",)
                 )
                 logging.info(f"サイズ {size} の商品IDを取得しています")
             else:
-                cursor.execute("SELECT product_id, name, size, created_at FROM products ORDER BY created_at DESC")
+                cursor.execute(
+                    """
+                    SELECT product_id, name, size, outer_dimension_sum, inner_length, 
+                           inner_width, inner_depth, outer_length, outer_width, outer_depth,
+                           manufacturing_method, processing_location, color, box_type, 
+                           thickness, material, standard_width, created_at, updated_at
+                    FROM products 
+                    ORDER BY created_at DESC
+                    """
+                )
                 logging.info("全商品IDを取得しています")
             
             rows = cursor.fetchall()
@@ -415,7 +471,7 @@ class Database:
             logging.error(f"商品ID取得エラー: {str(e)}")
             return []
         finally:
-            cursor.close() 
+            cursor.close()
 
     def recreate_tables(self):
         """テーブルを再作成"""
